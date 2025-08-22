@@ -47,7 +47,7 @@ from browser_use.logging_config import addLoggingLevel
 from browser_use.telemetry import CLITelemetryEvent, ProductTelemetry
 from browser_use.utils import get_browser_use_version
 
-USER_DATA_DIR = CONFIG.BROWSER_USE_PROFILES_DIR / 'cli'
+USER_DATA_DIR = Path('C:/Users/drmcn/.config/browseruse/profiles/default')
 
 # Default User settings
 MAX_HISTORY_LENGTH = 100
