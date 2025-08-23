@@ -72,14 +72,33 @@ class StructuredCritique(BaseModel):
     strengths: List[str] = Field(description="Things that are done well")
     final_recommendation: str = Field(description="Final recommendation: approve, revise, reject")
 
+# Replace the ExtractedData class in your script with this version:
+
+from typing import Any, Dict, Union, List, Optional
+from pydantic import BaseModel, Field
+
 class ExtractedData(BaseModel):
     """Generic structured data extraction result."""
     data_type: str = Field(description="Type of data extracted (table, list, text, product, etc.)")
-    content: Dict[str, Any] = Field(description="The actual extracted data in structured format")
+    # Changed from Dict[str, Any] to Any to avoid Gemini schema validation issues
+    content: Any = Field(description="The actual extracted data in structured format (can be dict, list, string, etc.)")
     confidence: float = Field(description="Confidence score 0-1 for extraction quality")
     source_url: Optional[str] = Field(description="URL where data was extracted from", default=None)
     timestamp: str = Field(description="When the data was extracted", default_factory=lambda: datetime.now().isoformat())
 
+# Alternative approach if you need more type safety:
+# You can use a Union type to be explicit about what content can contain
+class ExtractedDataAlternative(BaseModel):
+    """Generic structured data extraction result with explicit type union."""
+    data_type: str = Field(description="Type of data extracted (table, list, text, product, etc.)")
+    # Explicitly define possible types for content
+    content: Union[Dict[str, Union[str, int, float, bool, list, dict]], List[Any], str] = Field(
+        description="The actual extracted data - can be a dictionary, list, or string"
+    )
+    confidence: float = Field(description="Confidence score 0-1 for extraction quality")
+    source_url: Optional[str] = Field(description="URL where data was extracted from", default=None)
+    timestamp: str = Field(description="When the data was extracted", default_factory=lambda: datetime.now().isoformat())
+    
 # Common schema for events/appointments (example target schema)
 class EventEntry(BaseModel):
     """Single event/appointment entry."""
@@ -696,13 +715,22 @@ You MUST output valid JSON following the StructuredPlan schema. No additional te
 
 Create a structured plan for the task: "{task}"
 
-**AVAILABLE CUSTOM ACTION**: When built-in table extraction fails, recommend "fallback_extract_table" which provides complete "Tabular → Text → JSON" pipeline:
-1. EXTRACT: File→Download CSV (Google Sheets) → Select All→Copy clipboard → HTML table parsing
-2. STRUCTURE: Uses LLM to map raw data to target schema (EventsSchema for schedules/calendars)
-3. RETURN: Clean structured JSON matching requested schema
+**AVAILABLE CUSTOM ACTIONS**:
 
-Usage: fallback_extract_table(want_fields=['date', 'time', 'event'], target_schema='EventsSchema')
-Universal tool that works across any site/app when normal table parsing struggles. """
+1. 'search_web' - Fast & cheap web search via Serper API with browser fallback:
+   - Much cheaper than browser searches ($2 per 1000 vs $0.25 per search)
+   - Faster and more reliable than navigating to Google
+   - Automatically falls back to browser search if API fails
+   - Returns formatted results with titles, URLs, snippets
+   - Usage: search_web(query='your search terms', num_results=10)
+   - Use this instead of navigating to Google for research tasks
+
+2. 'fallback_extract_table' - Complete Tabular → Text → JSON pipeline:
+   - Extract: File→Download CSV (Google Sheets) → Select All→Copy clipboard → HTML table parsing
+   - Structure: Uses LLM to map raw data to target schema (EventsSchema for schedules/calendars)
+   - Return: Clean structured JSON matching requested schema
+   - Usage: fallback_extract_table(want_fields=['date', 'time', 'event'], target_schema='EventsSchema')
+   - Works universally on any table/schedule across any site/app when normal table parsing struggles """
 
 CRITIC_SYS = """You are a strict QA checker for web-automation plans and outcomes.
 
