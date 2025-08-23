@@ -37,6 +37,9 @@ from browser_use import Agent, BrowserProfile, BrowserSession, Controller
 from browser_use.agent.views import AgentHistoryList
 from browser_use.llm import ChatOpenAI, ChatGoogle, SystemMessage, UserMessage  # NOTE: imports from browser_use.llm
 
+# Import Serper search integration
+from serper_search import search_with_serper_fallback
+
 # ----------------------------
 # Structured Output Schemas
 # ----------------------------
@@ -76,6 +79,25 @@ class ExtractedData(BaseModel):
     confidence: float = Field(description="Confidence score 0-1 for extraction quality")
     source_url: Optional[str] = Field(description="URL where data was extracted from", default=None)
     timestamp: str = Field(description="When the data was extracted", default_factory=lambda: datetime.now().isoformat())
+
+# Common schema for events/appointments (example target schema)
+class EventEntry(BaseModel):
+    """Single event/appointment entry."""
+    date: str = Field(description="Event date in YYYY-MM-DD format")
+    time: Optional[str] = Field(description="Event time (e.g. '09:00', '14:30')", default=None)
+    title: str = Field(description="Event title/name")
+    description: Optional[str] = Field(description="Event description or notes", default=None)
+    location: Optional[str] = Field(description="Event location", default=None)
+    attendees: Optional[str] = Field(description="Number of attendees or attendee list", default=None)
+    duration: Optional[str] = Field(description="Event duration", default=None)
+    status: Optional[str] = Field(description="Event status (confirmed, tentative, etc.)", default=None)
+
+class EventsSchema(BaseModel):
+    """Collection of events extracted from a table/schedule."""
+    events: List[EventEntry] = Field(description="List of events/appointments")
+    total_count: int = Field(description="Total number of events found")
+    date_range: Optional[str] = Field(description="Date range covered (e.g. '2024-01-15 to 2024-01-20')", default=None)
+    extraction_source: str = Field(description="How the data was extracted")
 
 class ExecutionEvent(BaseModel):
     """Single event in execution history."""
@@ -449,40 +471,211 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
         confidence=confidence
     )
 
+async def llm_structure_table_data(llm, table_data: TableData, target_schema_name: str = "EventsSchema", target_schema=None) -> Dict[str, Any]:
+    """
+    Use LLM to structure raw table data according to a target schema.
+    This completes the "Tabular → Text → JSON" pipeline.
+    
+    Args:
+        llm: LLM instance to use for structuring
+        table_data: Raw table data from fallback extraction
+        target_schema_name: Name of the target schema (for prompt)
+        target_schema: Pydantic model class for the target schema
+        
+    Returns:
+        dict: Structured data matching the target schema
+    """
+    if not table_data.rows:
+        return {"error": "No table data to structure", "events": [], "total_count": 0}
+    
+    # Create text representation of the table
+    table_text = f"HEADERS: {', '.join(table_data.headers)}\n\nROWS:\n"
+    for i, row in enumerate(table_data.rows, 1):
+        table_text += f"Row {i}: {' | '.join(str(cell) for cell in row)}\n"
+    
+    # Use default EventsSchema if no target schema provided
+    if target_schema is None:
+        target_schema = EventsSchema
+        target_schema_name = "EventsSchema"
+    
+    structure_prompt = f"""
+You are a data structuring specialist. Convert the raw table data below into a structured JSON format following the {target_schema_name} schema.
+
+RAW TABLE DATA:
+{table_text}
+
+EXTRACTION METHOD: {table_data.extraction_method}
+CONFIDENCE: {table_data.confidence}
+
+INSTRUCTIONS:
+1. Analyze the table structure and identify what each column represents
+2. Map the data to the appropriate schema fields
+3. Handle missing or unclear data gracefully (use null/empty values)
+4. Parse dates into YYYY-MM-DD format when possible
+5. Extract times in HH:MM format when possible
+6. Infer event titles, locations, descriptions from available columns
+7. Count the total number of events
+8. Determine the date range if dates are present
+
+OUTPUT: Return ONLY valid JSON matching the {target_schema_name} schema. No additional text or comments.
+"""
+
+    try:
+        print_status(f"🧠 Using LLM to structure table data into {target_schema_name}...", Colors.BLUE)
+        
+        # Get structured response from LLM
+        messages = [
+            SystemMessage(content=structure_prompt.strip()),
+            UserMessage(content="Please structure this table data now.")
+        ]
+        
+        # Request structured output if the LLM supports it
+        if hasattr(llm, 'generate_structured'):
+            # For LLMs that support structured output
+            structured_response = await llm.generate_structured(
+                messages=messages,
+                output_model=target_schema
+            )
+            result = structured_response.model_dump()
+        else:
+            # Fallback to regular generation + JSON parsing
+            response = await llm.generate(messages=messages)
+            response_text = response.choices[0].message.content.strip()
+            
+            # Try to extract JSON from the response
+            import re
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                result = json.loads(json_str)
+            else:
+                # If no JSON found, try parsing the whole response
+                result = json.loads(response_text)
+        
+        # Validate against schema if provided
+        if target_schema:
+            validated = target_schema(**result)
+            result = validated.model_dump()
+        
+        result["extraction_source"] = f"llm_structured_from_{table_data.extraction_method}"
+        print_status(f"✅ Successfully structured {result.get('total_count', 0)} items", Colors.GREEN)
+        
+        return result
+        
+    except json.JSONDecodeError as e:
+        print_status(f"❌ JSON parsing error: {e}", Colors.RED)
+        return {
+            "error": f"Failed to parse LLM response as JSON: {e}",
+            "events": [],
+            "total_count": 0,
+            "extraction_source": f"error_from_{table_data.extraction_method}"
+        }
+    except Exception as e:
+        print_status(f"❌ LLM structuring error: {e}", Colors.RED)
+        return {
+            "error": f"Failed to structure data with LLM: {e}",
+            "events": [],
+            "total_count": 0,
+            "extraction_source": f"error_from_{table_data.extraction_method}"
+        }
+
 # ----------------------------
 # Custom Action Registration for Browser-Use
 # ----------------------------
-async def register_fallback_extraction_action(controller):
+async def register_fallback_extraction_action(controller, llm=None):
     """Register the fallback table extraction as a custom action."""
     
     @controller.action("fallback_extract_table")
-    async def fallback_extract_table_action(want_fields: List[str] = None) -> dict:
+    async def fallback_extract_table_action(want_fields: List[str] = None, target_schema: str = "EventsSchema", structure_with_llm: bool = True) -> dict:
         """
         Generic fallback table extraction that works on any schedule/table.
+        Completes the "Tabular → Text → JSON" pipeline.
         
         Tries multiple strategies:
         1. File → Download as CSV (for Google Sheets, etc.)
         2. Select All → Copy to get TSV from clipboard  
         3. HTML table parsing as last resort
+        4. Use LLM to structure the data according to target schema
         
         Args:
             want_fields: Optional list of field names to filter for
+            target_schema: Target schema name ("EventsSchema" by default)
+            structure_with_llm: Whether to use LLM for structuring (default True)
             
         Returns:
-            dict: {"headers": [...], "rows": [[...]], "extraction_method": "...", "confidence": float}
+            dict: Structured data matching target schema, or raw table data if structuring disabled
         """
+        print_status("🔄 Starting fallback table extraction with LLM structuring...", Colors.BLUE)
+        
+        # Step 1: Extract raw table data
         table_data = await fallback_extract_table(controller, want_fields)
         
-        return {
-            "headers": table_data.headers,
-            "rows": table_data.rows,
-            "row_count": table_data.row_count,
-            "column_count": table_data.column_count,
-            "extraction_method": table_data.extraction_method,
-            "confidence": table_data.confidence
-        }
+        if not table_data.rows:
+            return {
+                "error": "No table data could be extracted",
+                "events": [],
+                "total_count": 0,
+                "extraction_method": table_data.extraction_method
+            }
+        
+        # Step 2: Structure with LLM if requested and available
+        if structure_with_llm and llm:
+            print_status("🧠 Structuring table data with LLM...", Colors.BLUE)
+            
+            # Map target schema name to actual schema class
+            schema_mapping = {
+                "EventsSchema": EventsSchema,
+                "events": EventsSchema,
+                "schedule": EventsSchema,
+                "calendar": EventsSchema
+            }
+            
+            target_schema_class = schema_mapping.get(target_schema.lower(), EventsSchema)
+            structured_result = await llm_structure_table_data(
+                llm=llm,
+                table_data=table_data,
+                target_schema_name=target_schema,
+                target_schema=target_schema_class
+            )
+            
+            return structured_result
+        
+        else:
+            # Return raw table data if LLM structuring not available/requested
+            print_status("📋 Returning raw table data (no LLM structuring)", Colors.YELLOW)
+            return {
+                "headers": table_data.headers,
+                "rows": table_data.rows,
+                "row_count": table_data.row_count,
+                "column_count": table_data.column_count,
+                "extraction_method": table_data.extraction_method,
+                "confidence": table_data.confidence
+            }
     
-    print_status("✅ Registered custom action: fallback_extract_table", Colors.GREEN)
+    print_status("✅ Registered custom action: fallback_extract_table (with LLM structuring)", Colors.GREEN)
+
+async def register_serper_search_action(controller):
+    """Register the Serper API search as a custom action with browser fallback."""
+    
+    @controller.action("search_web")
+    async def search_web_action(query: str, num_results: int = 10) -> str:
+        """
+        Search the web using Serper API with browser fallback.
+        Much cheaper and more reliable than browser searches.
+        
+        Args:
+            query: Search query string
+            num_results: Number of results to return (default 10, max 100)
+            
+        Returns:
+            str: Formatted search results with titles, URLs, and snippets
+        """
+        print_status(f"🔍 Searching web: {query}", Colors.BLUE)
+        
+        result = await search_with_serper_fallback(controller, query, num_results)
+        return result.extracted_content
+    
+    print_status("✅ Registered custom action: search_web (Serper API with browser fallback)", Colors.GREEN)
 
 # ----------------------------
 # Planner / Critic prompts (GENERAL — not task-specific)
@@ -503,12 +696,13 @@ You MUST output valid JSON following the StructuredPlan schema. No additional te
 
 Create a structured plan for the task: "{task}"
 
-**AVAILABLE CUSTOM ACTION**: When built-in table extraction fails, recommend using the custom action "fallback_extract_table" which:
-- Attempts File→Download CSV (works on Google Sheets, web apps)
-- Falls back to Select All→Copy to capture TSV/CSV from clipboard
-- Parses HTML tables as last resort
-- Returns structured data: {"headers": [...], "rows": [[...]], "extraction_method": "...", "confidence": 0.0-1.0}
-This is a universal table extraction tool that works across any site/app when normal parsing struggles. """
+**AVAILABLE CUSTOM ACTION**: When built-in table extraction fails, recommend "fallback_extract_table" which provides complete "Tabular → Text → JSON" pipeline:
+1. EXTRACT: File→Download CSV (Google Sheets) → Select All→Copy clipboard → HTML table parsing
+2. STRUCTURE: Uses LLM to map raw data to target schema (EventsSchema for schedules/calendars)
+3. RETURN: Clean structured JSON matching requested schema
+
+Usage: fallback_extract_table(want_fields=['date', 'time', 'event'], target_schema='EventsSchema')
+Universal tool that works across any site/app when normal table parsing struggles. """
 
 CRITIC_SYS = """You are a strict QA checker for web-automation plans and outcomes.
 
@@ -591,7 +785,10 @@ def process_agent_history_to_structured_result(history: AgentHistoryList, task: 
     for i, step in enumerate(history.history):
         if hasattr(step, 'result') and step.result:
             for action_result in step.result:
-                success = getattr(action_result, 'success', True) and not getattr(action_result, 'error', None)
+                # Ensure success is always a boolean - fix for Pydantic validation
+                action_success = getattr(action_result, 'success', True)
+                action_error = getattr(action_result, 'error', None)
+                success = bool(action_success) and not bool(action_error)
                 if success:
                     successful_steps += 1
                 
@@ -670,6 +867,93 @@ async def execute_milestone_chunk(agent: Agent, chunk_steps: int = 4) -> AgentHi
     # Set max_steps for this chunk
     agent.max_steps = chunk_steps
     return await agent.run()
+
+async def gather_milestone_state(controller, chunk_history: AgentHistoryList) -> str:
+    """Gather current browser state for milestone critique."""
+    state_info = []
+    
+    try:
+        if controller and hasattr(controller, 'page'):
+            # Current URL
+            current_url = controller.page.url
+            state_info.append(f"Current URL: {current_url}")
+            
+            # Page title
+            try:
+                title = await controller.page.title()
+                state_info.append(f"Page Title: {title}")
+            except:
+                pass
+                
+            # Brief DOM excerpt (first 300 chars of visible text)
+            try:
+                visible_text = await controller.page.locator('body').inner_text()
+                if visible_text:
+                    excerpt = visible_text[:300] + "..." if len(visible_text) > 300 else visible_text
+                    state_info.append(f"Page Content: {excerpt}")
+            except:
+                pass
+                
+            # Check for common error indicators
+            try:
+                error_indicators = await controller.page.locator('text="Error" >> visible=true').count()
+                if error_indicators > 0:
+                    state_info.append(f"Error elements detected: {error_indicators}")
+            except:
+                pass
+                
+    except Exception as e:
+        state_info.append(f"State gathering error: {str(e)}")
+    
+    # Add execution summary
+    if chunk_history and hasattr(chunk_history, 'history'):
+        action_count = len(chunk_history.history)
+        state_info.append(f"Actions in this milestone: {action_count}")
+        
+        # Last action result
+        if chunk_history.history:
+            last_step = chunk_history.history[-1]
+            if hasattr(last_step, 'result') and last_step.result:
+                last_action = str(last_step.result[-1].__class__.__name__ if last_step.result else "Unknown")
+                state_info.append(f"Last action: {last_action}")
+    
+    return '\n'.join(state_info) if state_info else "No state information available"
+
+def summarize_chunk_history(chunk_history: AgentHistoryList) -> str:
+    """Create a brief summary of what happened in this milestone chunk."""
+    if not chunk_history or not hasattr(chunk_history, 'history'):
+        return "No execution history available"
+    
+    summary_parts = []
+    success_count = 0
+    error_count = 0
+    
+    for step in chunk_history.history:
+        if hasattr(step, 'result') and step.result:
+            for action in step.result:
+                action_name = action.__class__.__name__ if hasattr(action, '__class__') else 'UnknownAction'
+                
+                # Check if action succeeded
+                if hasattr(action, 'error') and action.error:
+                    summary_parts.append(f"❌ {action_name}: {str(action.error)[:100]}")
+                    error_count += 1
+                else:
+                    summary_parts.append(f"✅ {action_name}")
+                    success_count += 1
+                
+                # Add extracted content if available
+                if hasattr(action, 'extracted_content') and action.extracted_content:
+                    content_preview = str(action.extracted_content)[:100]
+                    summary_parts.append(f"   📄 Extracted: {content_preview}")
+    
+    # Add stats
+    total_actions = success_count + error_count
+    success_rate = (success_count / total_actions * 100) if total_actions > 0 else 0
+    
+    summary = f"Milestone Summary: {total_actions} actions ({success_rate:.0f}% success)\n"
+    summary += '\n'.join(summary_parts[-10:])  # Last 10 actions
+    
+    return summary
 
 async def assess_progress(planner_llm, original_query: str, current_plan: str, history: AgentHistoryList) -> ProgressAssessment:
     """Use planner/critic to assess current progress and decide next steps."""
@@ -804,12 +1088,14 @@ async def run_query(query: str, keep_browser_open: bool = True) -> bool:
         print_status(f"   ✅ Using ExtractedData schema for structured output", Colors.GREEN)
 
     # ---- Milestone-based Execution with Frequent Planner/Critic Check-ins
-    print_status("Starting milestone-based execution with frequent re-assessment...", Colors.YELLOW)
-    print()
-    
     # Execution parameters
     CHUNK_SIZE = 4  # Execute 4 steps, then reassess
     MAX_MILESTONES = 8  # Maximum number of milestone chunks (32 total steps max)
+    
+    print_status("Starting milestone-based execution with frequent re-assessment...", Colors.YELLOW)
+    print_status(f"🎯 Milestone Strategy: {CHUNK_SIZE} steps per milestone, up to {MAX_MILESTONES} milestones", Colors.BLUE)
+    print_status("   ✅ Each milestone includes: Execute → Critique → Plan Adjustment → Continue", Colors.GREEN)
+    print()
     
     all_histories = []
     milestone_count = 0
@@ -818,7 +1104,9 @@ async def run_query(query: str, keep_browser_open: bool = True) -> bool:
     
     while milestone_count < MAX_MILESTONES and not task_completed:
         milestone_count += 1
-        print_status(f"🎯 Milestone {milestone_count}/{MAX_MILESTONES} - Executing {CHUNK_SIZE} steps...", Colors.BLUE)
+        print_status(f"\n{'='*60}", Colors.BLUE)
+        print_status(f"🎯 MILESTONE {milestone_count}/{MAX_MILESTONES} - Executing {CHUNK_SIZE} steps...", Colors.BOLD + Colors.BLUE)
+        print_status(f"{'='*60}\n", Colors.BLUE)
         
         # Create agent for this milestone chunk
         agent = Agent(
@@ -827,12 +1115,13 @@ async def run_query(query: str, keep_browser_open: bool = True) -> bool:
             browser_session=browser_session,
             output_model_schema=output_schema,
             max_steps=CHUNK_SIZE,
-            extend_system_message="CRITICAL: Focus on immediate next steps. When extracting data, use structured output format. Prefer in-app viewers; avoid downloads; keep to the user's stated intent.\n\nCUSTOM ACTION AVAILABLE: If you encounter difficulty extracting table/spreadsheet data, you can call the 'fallback_extract_table' action which will:\n1. Try File→Download CSV (Google Sheets, etc.)\n2. Fall back to Select All→Copy clipboard extraction\n3. Parse HTML tables as last resort\nThis works universally across any site/app with tabular data."
+            extend_system_message="CRITICAL: Focus on immediate next steps. When extracting data, use structured output format. Prefer in-app viewers; avoid downloads; keep to the user's stated intent.\n\nCUSTOM ACTIONS AVAILABLE:\n\n1. 'search_web' - Fast & cheap web search via Serper API with browser fallback:\n   - Much cheaper than browser searches ($2 per 1000 vs $0.25 per search)\n   - Faster and more reliable than navigating to Google\n   - Automatically falls back to browser search if API fails\n   - Returns formatted results with titles, URLs, snippets\n   - Call with: search_web(query='your search terms', num_results=10)\n   - Use this instead of navigating to Google for research tasks\n\n2. 'fallback_extract_table' - Complete Tabular → Text → JSON pipeline:\n   - Extract: Try File→Download CSV (Google Sheets) → Select All→Copy clipboard → HTML table parsing\n   - Structure: Use LLM to map raw data to target schema (EventsSchema by default)\n   - Return: Structured JSON ready for use\n   - Call with: fallback_extract_table(want_fields=['date', 'time', 'event'], target_schema='EventsSchema')\n   - Works universally on any table/schedule across any site/app when normal extraction struggles"
         )
         
-        # Register custom fallback extraction action
+        # Register custom actions
         if hasattr(agent, 'controller') and agent.controller:
-            await register_fallback_extraction_action(agent.controller)
+            await register_fallback_extraction_action(agent.controller, llm=executor_llm)
+            await register_serper_search_action(agent.controller)
         
         try:
             # Execute milestone chunk
@@ -844,6 +1133,34 @@ async def run_query(query: str, keep_browser_open: bool = True) -> bool:
             progress = await assess_progress(planner_llm, query, current_plan, chunk_history)
             
             print_status(f"Progress: {progress.progress_percentage}% | Status: {progress.current_status[:50]}...", Colors.GREEN if progress.should_continue else Colors.YELLOW)
+            
+            # ---- NEW: Milestone Structured Critique Pass ----
+            print_status(f"🔍 Running milestone {milestone_count}/{MAX_MILESTONES} structured critique...", Colors.YELLOW)
+            try:
+                # Gather current state for critic
+                current_state = await gather_milestone_state(agent.controller if hasattr(agent, 'controller') else None, chunk_history)
+                
+                # Call structured critic to review execution
+                milestone_critique = await structured_chat(
+                    planner_llm,
+                    user_prompt=f"MILESTONE {milestone_count} CRITIQUE:\n\nOriginal Plan:\n{current_plan}\n\nProgress: {progress.progress_percentage}%\n\nCurrent Status: {progress.current_status}\n\nObstacles: {', '.join(progress.obstacles_encountered)}\n\nCurrent State:\n{current_state}\n\nRecent Execution Summary:\n{summarize_chunk_history(chunk_history)}",
+                    system_prompt=f"You are critiquing milestone {milestone_count}/{MAX_MILESTONES} execution. Analyze what's working, what's not, and provide specific recommendations for the next milestone. Focus on tactical adjustments rather than complete replanning.",
+                    response_model=StructuredCritique
+                )
+                
+                print_status(f"🔎 Milestone critique: {milestone_critique.overall_assessment} | {len(milestone_critique.issues_found)} issues | {milestone_critique.final_recommendation}", Colors.BLUE)
+                
+                # Apply high-priority critic recommendations to current plan
+                if milestone_critique.issues_found:
+                    high_priority_fixes = [issue for issue in milestone_critique.issues_found if issue.severity in ["high", "critical"]]
+                    if high_priority_fixes:
+                        print_status(f"🔧 Applying {len(high_priority_fixes)} critical/high priority fixes to plan", Colors.YELLOW)
+                        current_plan += f"\n\n# Milestone {milestone_count} Critical Adjustments:\n"
+                        for fix in high_priority_fixes:
+                            current_plan += f"- {fix.issue_type}: {fix.recommendation}\n"
+                        
+            except Exception as e:
+                print_status(f"⚠️  Milestone critique failed, continuing: {e}", Colors.YELLOW)
             
             # Check if task is completed
             if progress.progress_percentage >= 95 or not progress.should_continue:
