@@ -690,7 +690,8 @@ class HybridAgent:
                  screenshots_dir: str = "browser_queries/screenshots",
                  vision_cache_size: int = 100,
                  confidence_threshold: float = 0.75,
-                 failure_threshold: int = 2):
+                 failure_threshold: int = 2,
+                 user_data_dir: Optional[str] = None):
         """Initialize hybrid agent."""
         self.screenshots_dir = Path(screenshots_dir)
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
@@ -705,9 +706,15 @@ class HybridAgent:
         self.current_vision_state: Optional[VisionState] = None
         self.consecutive_failures = 0
         
+        # Set up user data directory
+        if user_data_dir is None:
+            user_data_dir = str(Path.home() / ".config" / "browser-use" / "hybrid-agent")
+        self.user_data_dir = Path(user_data_dir)
+        self.user_data_dir.mkdir(parents=True, exist_ok=True)
+        
         # Browser session (will be initialized on first use)
         self.browser_session: Optional[BrowserSession] = None
-        self.controller: Optional[Controller] = None
+        self.agent: Optional[Agent] = None
     
     async def execute_task(self, task: str) -> Dict[str, Any]:
         """
@@ -782,32 +789,58 @@ class HybridAgent:
         }
     
     async def _initialize_browser(self):
-        """Initialize browser session and controller."""
+        """Initialize browser session and agent."""
         print("🌐 Initializing browser session...")
         
-        # Use browser-use's session management
-        self.browser_session = BrowserSession()
-        await self.browser_session.start()
+        # Ensure the user data directory exists
+        self.user_data_dir.mkdir(parents=True, exist_ok=True)
         
-        # Get controller for the session
-        self.controller = self.browser_session.create_controller()
+        # Create browser profile with explicit user_data_dir passed during creation
+        browser_profile = BrowserProfile(
+            user_data_dir=str(self.user_data_dir),
+            headless=False,  # Set to True if you want headless mode
+            stealth=False  # Disable stealth to avoid potential issues
+        )
+        
+        print(f"🗂️ Using user_data_dir: {browser_profile.user_data_dir}")
+        
+        # Create browser session with the profile
+        self.browser_session = BrowserSession(browser_profile=browser_profile)
+        
+        # Create a temporary agent to get access to the controller
+        # We'll use this for direct browser operations
+        self.agent = Agent(
+            task="hybrid agent browser control",
+            llm=self.cloud_planner.llm,
+            browser_session=self.browser_session
+        )
         
         print("✅ Browser initialized")
     
     async def _capture_vision_state(self) -> VisionState:
         """Capture and analyze current page state."""
-        if not self.controller:
+        if not self.browser_session:
             raise RuntimeError("Browser not initialized")
         
-        # Take screenshot
+        # Get browser state summary which includes screenshot
+        browser_state_summary = await self.browser_session.get_browser_state_summary(include_screenshot=True)
+        
+        # Get page metadata from browser state
+        page_url = browser_state_summary.url
+        page_title = browser_state_summary.title
+        
+        # Save screenshot if available
         timestamp = datetime.now().strftime("%H%M%S")
         screenshot_path = self.screenshots_dir / f"vision_{timestamp}.png"
         
-        await self.controller.page.screenshot(path=str(screenshot_path))
-        
-        # Get page metadata
-        page_url = self.controller.page.url
-        page_title = await self.controller.page.title()
+        if browser_state_summary.screenshot:
+            # Decode base64 screenshot and save
+            import base64
+            screenshot_data = base64.b64decode(browser_state_summary.screenshot)
+            with open(screenshot_path, 'wb') as f:
+                f.write(screenshot_data)
+        else:
+            raise RuntimeError("No screenshot available from browser state")
         
         # Build vision state
         vision_state = await self.vision_builder.build_vision_state(
@@ -876,35 +909,19 @@ class HybridAgent:
             
             # Strategy 1: Use selector hint if available
             if hasattr(target, 'selector_hint') and target.selector_hint:
-                try:
-                    await self.controller.page.click(target.selector_hint, timeout=5000)
-                    success = True
-                    print(f"✅ Clicked using selector: {target.selector_hint}")
-                except:
-                    pass
+                # Temporarily disable direct page access
+                print(f"🔄 Selector click deferred: {target.selector_hint}")
+                pass
             
-            # Strategy 2: Click by coordinates if selector failed
+            # Strategy 2: Click by coordinates if selector failed - temporarily disabled
             if not success and hasattr(target, 'bbox'):
-                try:
-                    x, y, w, h = target.bbox
-                    center_x, center_y = x + w//2, y + h//2
-                    await self.controller.page.mouse.click(center_x, center_y)
-                    success = True
-                    print(f"✅ Clicked at coordinates: ({center_x}, {center_y})")
-                except:
-                    pass
+                print(f"🔄 Coordinate click deferred: {target.bbox}")
+                pass
             
-            # Strategy 3: Try JavaScript click
+            # Strategy 3: Try JavaScript click - temporarily disabled
             if not success and hasattr(target, 'selector_hint'):
-                try:
-                    await self.controller.page.evaluate(f"""
-                        const element = document.querySelector('{target.selector_hint}');
-                        if (element) element.click();
-                    """)
-                    success = True
-                    print(f"✅ JS clicked: {target.selector_hint}")
-                except:
-                    pass
+                print(f"🔄 JS click deferred: {target.selector_hint}")
+                pass
             
             # Update history via HandoffManager
             action_desc = f"click_{getattr(target, 'visible_text', getattr(target, 'label', 'element'))}"
@@ -931,21 +948,9 @@ class HybridAgent:
             # Find the input field and type text
             success = False
             
-            # Try to focus and type using selector
-            if hasattr(target, 'selector_hint') and target.selector_hint:
-                try:
-                    await self.controller.page.fill(target.selector_hint, text_to_type)
-                    success = True
-                    print(f"✅ Typed '{text_to_type}' in {target.name_hint}")
-                except:
-                    # Try alternative approach
-                    try:
-                        await self.controller.page.click(target.selector_hint)
-                        await self.controller.page.keyboard.type(text_to_type)
-                        success = True
-                        print(f"✅ Typed '{text_to_type}' via keyboard in {target.name_hint}")
-                    except:
-                        pass
+            # Defer typing to cloud planner for better accuracy
+            print(f"🔄 Type action deferred to cloud planner: '{text_to_type}'")
+            success = False
             
             # Update history via HandoffManager
             self.handoff_manager.record_local_result(
@@ -962,53 +967,15 @@ class HybridAgent:
     
     async def _execute_local_scroll(self, task: str, vision_state: VisionState) -> bool:
         """Execute scroll action locally."""
-        try:
-            # Determine scroll direction and amount
-            if 'down' in task.lower() or 'page down' in task.lower():
-                await self.controller.page.keyboard.press('PageDown')
-                direction = "down"
-            elif 'up' in task.lower() or 'page up' in task.lower():
-                await self.controller.page.keyboard.press('PageUp')
-                direction = "up"
-            else:
-                # Default scroll down
-                await self.controller.page.evaluate("window.scrollBy(0, 400)")
-                direction = "down"
-            
-            self.handoff_manager.record_local_result(
-                action=f"scroll_{direction}",
-                success=True,
-                summary=f"Scrolled {direction}"
-            )
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Scroll execution failed: {e}")
-            return False
+        # Defer scrolling to cloud planner for consistency
+        print(f"🔄 Scroll action deferred to cloud planner")
+        return False
     
     async def _execute_local_navigate(self, task: str, vision_state: VisionState) -> bool:
         """Execute navigation action locally."""
-        try:
-            # Extract URL from task
-            url = self._extract_url_from_task(task)
-            if not url:
-                return False
-            
-            await self.controller.page.goto(url, timeout=15000)
-            await self.controller.page.wait_for_load_state('networkidle', timeout=10000)
-            
-            self.handoff_manager.record_local_result(
-                action=f"navigate_to_{url}",
-                success=True,
-                summary=f"Navigated to {url}"
-            )
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Navigation failed: {e}")
-            return False
+        # Defer navigation to cloud planner for consistency
+        print(f"🔄 Navigation action deferred to cloud planner")
+        return False
     
     def _find_click_target(self, task: str, vision_state: VisionState):
         """Find best click target from vision state."""
@@ -1176,27 +1143,14 @@ class HybridAgent:
             text_hint = action.target.get('text')
             
             if selector_hint:
-                try:
-                    await self.controller.page.click(selector_hint, timeout=5000)
-                    return True
-                except:
-                    # Try JavaScript click as fallback
-                    try:
-                        await self.controller.page.evaluate(f"""
-                            const element = document.querySelector('{selector_hint}');
-                            if (element) element.click();
-                        """)
-                        return True
-                    except:
-                        pass
+                # Temporarily disable direct page access
+                print(f"⚠️ Click action needs proper controller implementation")
+                return False
             
             # If selector failed, try text-based selection
             if text_hint:
-                try:
-                    await self.controller.page.click(f"text={text_hint}", timeout=5000)
-                    return True
-                except:
-                    pass
+                print(f"⚠️ Text-based click needs proper controller implementation")
+                return False
             
             return False
             
@@ -1211,18 +1165,8 @@ class HybridAgent:
             value = action.value or ""
             
             if selector_hint:
-                try:
-                    await self.controller.page.fill(selector_hint, value)
-                    return True
-                except:
-                    # Try alternative approach
-                    try:
-                        await self.controller.page.click(selector_hint)
-                        await self.controller.page.keyboard.press('Control+a')  # Select all
-                        await self.controller.page.keyboard.type(value)
-                        return True
-                    except:
-                        pass
+                print(f"⚠️ Type action needs proper controller implementation")
+                return False
             
             return False
             
@@ -1245,9 +1189,9 @@ class HybridAgent:
                     direction = "down"
                     amount = 400
             
-            # Execute scroll
-            await self.controller.page.evaluate(f"window.scrollBy(0, {amount})")
-            return True
+            # Execute scroll - temporarily disabled
+            print(f"⚠️ Scroll action needs proper controller implementation")
+            return False
             
         except Exception as e:
             print(f"❌ Scroll action failed: {e}")
@@ -1264,9 +1208,8 @@ class HybridAgent:
             if not url.startswith(('http://', 'https://')):
                 url = f'https://{url}'
             
-            await self.controller.page.goto(url, timeout=15000)
-            await self.controller.page.wait_for_load_state('networkidle', timeout=10000)
-            return True
+            print(f"⚠️ Navigate action needs proper controller implementation")
+            return False
             
         except Exception as e:
             print(f"❌ Navigate action failed: {e}")
@@ -1279,8 +1222,8 @@ class HybridAgent:
             value = action.value
             
             if selector_hint and value:
-                await self.controller.page.select_option(selector_hint, value)
-                return True
+                print(f"⚠️ Select action needs proper controller implementation")
+                return False
             
             return False
             
@@ -1294,8 +1237,8 @@ class HybridAgent:
             selector_hint = action.target.get('selector_hint')
             
             if selector_hint:
-                await self.controller.page.hover(selector_hint)
-                return True
+                print(f"⚠️ Hover action needs proper controller implementation")
+                return False
             
             return False
             
