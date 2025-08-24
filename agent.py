@@ -176,9 +176,9 @@ class Colors:
 
 def print_header():
     print(f"\n{Colors.BOLD}{'='*70}{Colors.END}")
-    print(f"{Colors.BLUE}{Colors.BOLD}🤖 Browser-Use Query Tool - Aug23 Optimized{Colors.END}")
-    print(f"{Colors.GREEN}📊 Structured Outputs + Robustness Hooks + Model Escalation{Colors.END}")
-    print(f"{Colors.YELLOW}🚀 Planner: gpt-4o-mini → Executor: o3 → Escalation: claude-3-5-sonnet{Colors.END}")
+    print(f"{Colors.BLUE}{Colors.BOLD}Browser-Use Query Tool - Task Router Edition{Colors.END}")
+    print(f"{Colors.GREEN}Lightweight Task Classification + Simplified Execution Flow{Colors.END}")
+    print(f"{Colors.YELLOW}Planner: gpt-4o-mini | Executor: o3 | Escalation: claude-3-5-sonnet{Colors.END}")
     print(f"{Colors.BOLD}{'='*70}{Colors.END}\n")
 
 def print_status(message, color=Colors.BLUE):
@@ -252,7 +252,7 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
     Returns:
         TableData: Structured table data with headers and rows
     """
-    print_status("🔄 Attempting fallback table extraction...", Colors.YELLOW)
+    print_status("Attempting fallback table extraction...", Colors.YELLOW)
     
     extraction_method = "unknown"
     headers = []
@@ -261,7 +261,7 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
     
     try:
         # Strategy 1: Try to download as CSV (works for Google Sheets, some web apps)
-        print_status("  📥 Strategy 1: Attempting CSV download...", Colors.BLUE)
+        print_status("  Strategy 1: Attempting CSV download...", Colors.BLUE)
         
         # Look for File menu or download options
         try:
@@ -284,7 +284,7 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
                     if await element.is_visible():
                         await element.click()
                         download_clicked = True
-                        print_status("  ✅ Found download option", Colors.GREEN)
+                        print_status("  Found download option", Colors.GREEN)
                         
                         # Wait a bit and look for CSV option
                         await controller.page.wait_for_timeout(1000)
@@ -302,7 +302,7 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
                                 csv_element = await controller.page.locator(csv_sel).first
                                 if await csv_element.is_visible():
                                     await csv_element.click()
-                                    print_status("  ✅ CSV download initiated", Colors.GREEN)
+                                    print_status("  CSV download initiated", Colors.GREEN)
                                     
                                     # Wait for download and try to read it
                                     await controller.page.wait_for_timeout(3000)
@@ -316,13 +316,13 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
                     continue
                     
             if not download_clicked:
-                print_status("  ⚠️  No download option found", Colors.YELLOW)
+                print_status("  No download option found", Colors.YELLOW)
                 
         except Exception as e:
-            print_status(f"  ⚠️  CSV download failed: {e}", Colors.YELLOW)
+            print_status(f"  CSV download failed: {e}", Colors.YELLOW)
         
         # Strategy 2: Select All + Copy (most reliable fallback)
-        print_status("  📋 Strategy 2: Attempting select all + copy...", Colors.BLUE)
+        print_status("  Strategy 2: Attempting select all + copy...", Colors.BLUE)
         
         try:
             # Focus on the page body first
@@ -351,7 +351,7 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
                     clipboard_content = result.stdout
                 
                 if clipboard_content and len(clipboard_content.strip()) > 10:
-                    print_status("  ✅ Clipboard content retrieved", Colors.GREEN)
+                    print_status("  Clipboard content retrieved", Colors.GREEN)
                     
                     # Parse the clipboard content as TSV/CSV
                     lines = clipboard_content.strip().split('\n')
@@ -372,22 +372,22 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
                             extraction_method = "clipboard_copy"
                             confidence = 0.8
                             
-                            print_status(f"  ✅ Parsed {len(rows)} rows with {len(headers)} columns", Colors.GREEN)
+                            print_status(f"  Parsed {len(rows)} rows with {len(headers)} columns", Colors.GREEN)
                             
                         else:
-                            print_status("  ⚠️  Could not parse clipboard content as table", Colors.YELLOW)
+                            print_status("  Could not parse clipboard content as table", Colors.YELLOW)
                 else:
-                    print_status("  ⚠️  Clipboard content too short or empty", Colors.YELLOW)
+                    print_status("  Clipboard content too short or empty", Colors.YELLOW)
                     
             except Exception as e:
-                print_status(f"  ⚠️  Clipboard access failed: {e}", Colors.YELLOW)
+                print_status(f"  Clipboard access failed: {e}", Colors.YELLOW)
                 
         except Exception as e:
-            print_status(f"  ⚠️  Select all + copy failed: {e}", Colors.YELLOW)
+            print_status(f"  Select all + copy failed: {e}", Colors.YELLOW)
         
         # Strategy 3: HTML table parsing (last resort)
         if not rows:
-            print_status("  🔍 Strategy 3: Attempting HTML table parsing...", Colors.BLUE)
+            print_status("  Strategy 3: Attempting HTML table parsing...", Colors.BLUE)
             
             try:
                 # Look for HTML tables
@@ -434,12 +434,12 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
                             extraction_method = "html_parse"
                             confidence = 0.6  # Lower confidence for HTML parsing
                             
-                            print_status(f"  ✅ Parsed HTML table: {len(rows)} rows, {len(headers)} columns", Colors.GREEN)
+                            print_status(f"  Parsed HTML table: {len(rows)} rows, {len(headers)} columns", Colors.GREEN)
                 else:
-                    print_status("  ⚠️  No HTML tables found", Colors.YELLOW)
+                    print_status("  No HTML tables found", Colors.YELLOW)
                     
             except Exception as e:
-                print_status(f"  ⚠️  HTML table parsing failed: {e}", Colors.YELLOW)
+                print_status(f"  HTML table parsing failed: {e}", Colors.YELLOW)
         
         # Final validation and cleanup
         if headers and rows:
@@ -474,15 +474,15 @@ async def fallback_extract_table(controller, want_fields: List[str] = None) -> T
                     rows = filtered_rows
                     confidence += 0.1  # Boost confidence when we found requested fields
             
-            print_status(f"✅ Fallback extraction successful: {len(rows)} rows, {len(headers)} columns", Colors.GREEN)
+            print_status(f"Fallback extraction successful: {len(rows)} rows, {len(headers)} columns", Colors.GREEN)
             
         else:
-            print_status("❌ All extraction strategies failed", Colors.RED)
+            print_status("All extraction strategies failed", Colors.RED)
             extraction_method = "failed"
             confidence = 0.0
     
     except Exception as e:
-        print_status(f"❌ Fallback extraction error: {e}", Colors.RED)
+        print_status(f"Fallback extraction error: {e}", Colors.RED)
         extraction_method = "error"
         confidence = 0.0
     
@@ -582,12 +582,12 @@ OUTPUT: Return ONLY valid JSON matching the {target_schema_name} schema. No addi
             result = validated.model_dump()
         
         result["extraction_source"] = f"llm_structured_from_{table_data.extraction_method}"
-        print_status(f"✅ Successfully structured {result.get('total_count', 0)} items", Colors.GREEN)
+        print_status(f"Successfully structured {result.get('total_count', 0)} items", Colors.GREEN)
         
         return result
         
     except json.JSONDecodeError as e:
-        print_status(f"❌ JSON parsing error: {e}", Colors.RED)
+        print_status(f"JSON parsing error: {e}", Colors.RED)
         return {
             "error": f"Failed to parse LLM response as JSON: {e}",
             "events": [],
@@ -595,7 +595,7 @@ OUTPUT: Return ONLY valid JSON matching the {target_schema_name} schema. No addi
             "extraction_source": f"error_from_{table_data.extraction_method}"
         }
     except Exception as e:
-        print_status(f"❌ LLM structuring error: {e}", Colors.RED)
+        print_status(f"LLM structuring error: {e}", Colors.RED)
         return {
             "error": f"Failed to structure data with LLM: {e}",
             "events": [],
@@ -629,7 +629,7 @@ async def register_fallback_extraction_action(controller, llm=None):
         Returns:
             dict: Structured data matching target schema, or raw table data if structuring disabled
         """
-        print_status("🔄 Starting fallback table extraction with LLM structuring...", Colors.BLUE)
+        print_status("Starting fallback table extraction with LLM structuring...", Colors.BLUE)
         
         # Step 1: Extract raw table data
         table_data = await fallback_extract_table(controller, want_fields)
@@ -666,7 +666,7 @@ async def register_fallback_extraction_action(controller, llm=None):
         
         else:
             # Return raw table data if LLM structuring not available/requested
-            print_status("📋 Returning raw table data (no LLM structuring)", Colors.YELLOW)
+            print_status("Returning raw table data (no LLM structuring)", Colors.YELLOW)
             return {
                 "headers": table_data.headers,
                 "rows": table_data.rows,
@@ -676,7 +676,7 @@ async def register_fallback_extraction_action(controller, llm=None):
                 "confidence": table_data.confidence
             }
     
-    print_status("✅ Registered custom action: fallback_extract_table (with LLM structuring)", Colors.GREEN)
+    print_status("Registered custom action: fallback_extract_table (with LLM structuring)", Colors.GREEN)
 
 async def register_serper_search_action(controller):
     """Register the Serper API search as a custom action with browser fallback."""
@@ -694,12 +694,12 @@ async def register_serper_search_action(controller):
         Returns:
             str: Formatted search results with titles, URLs, and snippets
         """
-        print_status(f"🔍 Searching web: {query}", Colors.BLUE)
+        print_status(f"Searching web: {query}", Colors.BLUE)
         
         result = await search_with_serper_fallback(controller, query, num_results)
         return result.extracted_content
     
-    print_status("✅ Registered custom action: search_web (Serper API with browser fallback)", Colors.GREEN)
+    print_status("Registered custom action: search_web (Serper API with browser fallback)", Colors.GREEN)
 
 # ----------------------------
 # Planner / Critic prompts (GENERAL — not task-specific)
@@ -798,11 +798,11 @@ No additional text, explanations, or formatting. Just the JSON object."""
             
         except (ValidationError, json.JSONDecodeError) as e:
             if attempt == max_retries - 1:
-                print_status(f"❌ Failed to get valid structured response after {max_retries} attempts", Colors.RED)
+                print_status(f"Failed to get valid structured response after {max_retries} attempts", Colors.RED)
                 print_status(f"Last response: {resp.completion[:200]}...", Colors.YELLOW)
                 raise ValueError(f"Could not get valid {response_model.__name__} after {max_retries} attempts: {e}")
             
-            print_status(f"⚠️  Invalid JSON response (attempt {attempt + 1}/{max_retries}), retrying...", Colors.YELLOW)
+            print_status(f"Invalid JSON response (attempt {attempt + 1}/{max_retries}), retrying...", Colors.YELLOW)
             # Add more specific instruction for retry
             messages.append(UserMessage(content=f"The previous response was invalid JSON. Please provide ONLY valid JSON matching the {response_model.__name__} schema."))
     
@@ -880,497 +880,223 @@ def process_agent_history_to_structured_result(history: AgentHistoryList, task: 
     )
 
 # ----------------------------
-# Progress Assessment Schema
+# Task Classification Schema
 # ----------------------------
-class ProgressAssessment(BaseModel):
-    """Assessment of current progress toward goal."""
-    progress_percentage: int = Field(description="Estimated progress toward completion (0-100)")
-    current_status: str = Field(description="Brief description of current state")
-    obstacles_encountered: List[str] = Field(description="List of current obstacles or issues")
-    next_milestone: str = Field(description="What should be achieved in the next chunk")
-    needs_replanning: bool = Field(description="Whether the plan needs to be revised")
-    should_continue: bool = Field(description="Whether to continue with current approach")
-    fallback_needed: str = Field(description="Type of fallback if needed: none, table_extraction, simple_search, manual_intervention")
+class TaskType(BaseModel):
+    """Classification of the user's task type."""
+    category: str = Field(description="Task category: data_extraction, research, navigation, transaction")
+    complexity: str = Field(description="Task complexity: simple, moderate, complex")
+    requires_structured_output: bool = Field(description="Whether this task needs structured JSON output")
+    requires_planning: bool = Field(description="Whether this task needs upfront planning")
+    estimated_steps: int = Field(description="Estimated number of steps needed (1-20)")
 
 # ----------------------------
-# Milestone-based execution helper
+# Task Router
 # ----------------------------
-async def execute_milestone_chunk(agent: Agent, chunk_steps: int = 4) -> AgentHistoryList:
-    """Execute a small chunk of steps and return history."""
-    # Set max_steps for this chunk
-    agent.max_steps = chunk_steps
-    return await agent.run()
+class TaskRouter:
+    """Lightweight task classification and routing."""
+    
+    @staticmethod
+    async def classify_task(llm, query: str) -> TaskType:
+        """Classify the user's task and determine execution strategy."""
+        classification_prompt = f"""Classify this user query into a task type:
 
-async def gather_milestone_state(controller, chunk_history: AgentHistoryList) -> str:
-    """Gather current browser state for milestone critique."""
-    state_info = []
-    
-    try:
-        if controller and hasattr(controller, 'page'):
-            # Current URL
-            current_url = controller.page.url
-            state_info.append(f"Current URL: {current_url}")
-            
-            # Page title
-            try:
-                title = await controller.page.title()
-                state_info.append(f"Page Title: {title}")
-            except:
-                pass
-                
-            # Brief DOM excerpt (first 300 chars of visible text)
-            try:
-                visible_text = await controller.page.locator('body').inner_text()
-                if visible_text:
-                    excerpt = visible_text[:300] + "..." if len(visible_text) > 300 else visible_text
-                    state_info.append(f"Page Content: {excerpt}")
-            except:
-                pass
-                
-            # Check for common error indicators
-            try:
-                error_indicators = await controller.page.locator('text="Error" >> visible=true').count()
-                if error_indicators > 0:
-                    state_info.append(f"Error elements detected: {error_indicators}")
-            except:
-                pass
-                
-    except Exception as e:
-        state_info.append(f"State gathering error: {str(e)}")
-    
-    # Add execution summary
-    if chunk_history and hasattr(chunk_history, 'history'):
-        action_count = len(chunk_history.history)
-        state_info.append(f"Actions in this milestone: {action_count}")
+QUERY: {query}
+
+Categories:
+- data_extraction: Extracting tables, schedules, contact info, product details
+- research: Web searches, information gathering, fact checking  
+- navigation: Going to specific pages, logging in, basic interactions
+- transaction: Purchases, form submissions, account changes
+
+Complexity levels:
+- simple: Single page, basic interaction (1-3 steps)
+- moderate: Multiple pages, some logic (4-8 steps)
+- complex: Multi-step workflows, conditional logic (9+ steps)
+
+Structured output needed for data extraction tasks only.
+Planning needed for moderate/complex tasks only."""
         
-        # Last action result
-        if chunk_history.history:
-            last_step = chunk_history.history[-1]
-            if hasattr(last_step, 'result') and last_step.result:
-                last_action = str(last_step.result[-1].__class__.__name__ if last_step.result else "Unknown")
-                state_info.append(f"Last action: {last_action}")
-    
-    return '\n'.join(state_info) if state_info else "No state information available"
+        classification_sys = """You are a task classifier. Analyze the user query and determine:
+1. What category of task this is
+2. How complex the task is
+3. Whether it needs structured JSON output (data extraction only)
+4. Whether it needs upfront planning (moderate/complex only)
+5. Estimated number of steps
 
-def summarize_chunk_history(chunk_history: AgentHistoryList) -> str:
-    """Create a brief summary of what happened in this milestone chunk."""
-    if not chunk_history or not hasattr(chunk_history, 'history'):
-        return "No execution history available"
+Output valid JSON matching TaskType schema."""
+        
+        try:
+            return await structured_chat(
+                llm,
+                user_prompt=classification_prompt,
+                system_prompt=classification_sys,
+                response_model=TaskType
+            )
+        except Exception as e:
+            print_status(f"Task classification failed, using defaults: {e}", Colors.YELLOW)
+            return TaskType(
+                category="navigation",
+                complexity="moderate", 
+                requires_structured_output=False,
+                requires_planning=True,
+                estimated_steps=5
+            )
     
-    summary_parts = []
-    success_count = 0
-    error_count = 0
-    
-    for step in chunk_history.history:
-        if hasattr(step, 'result') and step.result:
-            for action in step.result:
-                action_name = action.__class__.__name__ if hasattr(action, '__class__') else 'UnknownAction'
-                
-                # Check if action succeeded
-                if hasattr(action, 'error') and action.error:
-                    summary_parts.append(f"❌ {action_name}: {str(action.error)[:100]}")
-                    error_count += 1
-                else:
-                    summary_parts.append(f"✅ {action_name}")
-                    success_count += 1
-                
-                # Add extracted content if available
-                if hasattr(action, 'extracted_content') and action.extracted_content:
-                    content_preview = str(action.extracted_content)[:100]
-                    summary_parts.append(f"   📄 Extracted: {content_preview}")
-    
-    # Add stats
-    total_actions = success_count + error_count
-    success_rate = (success_count / total_actions * 100) if total_actions > 0 else 0
-    
-    summary = f"Milestone Summary: {total_actions} actions ({success_rate:.0f}% success)\n"
-    summary += '\n'.join(summary_parts[-10:])  # Last 10 actions
-    
-    return summary
-
-async def assess_progress(planner_llm, original_query: str, current_plan: str, history: AgentHistoryList) -> ProgressAssessment:
-    """Use planner/critic to assess current progress and decide next steps."""
-    # Build progress context from history
-    recent_actions = []
-    if history and hasattr(history, 'history'):
-        for step in history.history[-5:]:  # Last 5 steps
-            if hasattr(step, 'result') and step.result:
-                for action in step.result:
-                    action_desc = f"Action: {action.__class__.__name__ if hasattr(action, '__class__') else 'unknown'}"
-                    if hasattr(action, 'extracted_content'):
-                        action_desc += f" | Result: {str(action.extracted_content)[:100]}"
-                    if hasattr(action, 'error') and action.error:
-                        action_desc += f" | Error: {action.error}"
-                    recent_actions.append(action_desc)
-    
-    progress_prompt = f"""Original Task: {original_query}
-
-Current Plan:
-{current_plan}
-
-Recent Actions Taken:
-{chr(10).join(recent_actions) if recent_actions else "No actions taken yet"}
-
-Assess the current progress toward completing the original task."""
-    
-    progress_system = """You are a progress assessor for web automation tasks. Analyze the current state and provide structured guidance.
-
-Consider:
-- Are we making meaningful progress toward the goal?
-- Are we stuck or encountering repeated failures?
-- Should we continue with current approach or replan?
-- Do we need a different strategy (table extraction, simpler search, etc.)?
-
-You MUST output valid JSON following the ProgressAssessment schema."""
-    
-    return await structured_chat(
-        planner_llm,
-        user_prompt=progress_prompt,
-        system_prompt=progress_system,
-        response_model=ProgressAssessment
-    )
+    @staticmethod
+    def get_task_system_prompt(task_type: TaskType) -> str:
+        """Get task-specific system prompt based on classification."""
+        base_prompt = "You are a web automation agent. Follow the user's intent precisely."
+        
+        if task_type.category == "data_extraction":
+            return f"{base_prompt} Focus on extracting structured data. Use table parsing and data extraction actions. Output structured JSON when complete."
+        elif task_type.category == "research":
+            return f"{base_prompt} Focus on information gathering. Use search actions efficiently. Synthesize findings clearly."
+        elif task_type.category == "navigation":
+            return f"{base_prompt} Focus on reaching the target page or state. Navigate efficiently with minimal steps."
+        elif task_type.category == "transaction":
+            return f"{base_prompt} Focus on completing the transaction safely. Verify each step before proceeding."
+        else:
+            return base_prompt
 
 # ----------------------------
-# Enhanced Core runner with frequent planner/critic involvement
+# Core runner with single upfront query normalization and failure-triggered critique
 # ----------------------------
 async def run_query(query: str, keep_browser_open: bool = True) -> bool:
-    print_status("Initializing milestone-based planner/critic system...", Colors.YELLOW)
-
-    # Browser session with aug23 stability optimizations
-    browser_profile = BrowserProfile(
-        user_data_dir=CHROME_PROFILE_DIR,
-        keep_alive=keep_browser_open,
-        headless=False,
-        # Aug23 stability-first timing
-        wait_for_network_idle_page_load_time=3.0,
-        minimum_wait_page_load_time=0.5,
-        maximum_wait_page_load_time=8.0,
-        wait_between_actions=0.7,
-        default_timeout=10_000,
-        default_navigation_timeout=45_000,
-    )
-    browser_session = BrowserSession(browser_profile=browser_profile)
-
-    # Aug23 Playbook LLM Strategy
-    planner_llm = ChatOpenAI(model=PLANNER_MODEL)   # gpt-4o-mini for cheap reasoning
-    executor_llm = ChatOpenAI(model=EXECUTOR_MODEL) # o3 for strong execution
-
-    print_status(f"Planner/Critic: {PLANNER_MODEL} (frequent re-assessment)", Colors.BLUE)
-    print_status(f"Executor: {EXECUTOR_MODEL} (milestone chunks)", Colors.BLUE)
-
-    # ---- Generate Initial Structured Plan
-    print_status("Generating initial structured plan...", Colors.YELLOW)
+    print_status("Initializing simplified execution flow...", Colors.YELLOW)
+    
+    # Initialize models
+    planner_llm = ChatOpenAI(model=PLANNER_MODEL)
+    executor_llm = ChatOpenAI(model=EXECUTOR_MODEL)
+    
     try:
-        structured_plan = await structured_chat(
-            planner_llm, 
-            user_prompt=f"Task: {query}", 
-            system_prompt=PLANNER_SYS.format(task=query),
-            response_model=StructuredPlan
+        # Step 1: Task Classification
+        print_status("Step 1: Classifying task type", Colors.BLUE)
+        task_type = await TaskRouter.classify_task(planner_llm, query)
+        print_status(f"Task classified: {task_type.category} ({task_type.complexity}, {task_type.estimated_steps} steps)", Colors.GREEN)
+        
+        # Step 2: Generate Plan (only if complex task)
+        plan = None
+        if task_type.requires_planning:
+            print_status("Step 2: Generating structured plan", Colors.BLUE)
+            try:
+                plan = await structured_chat(
+                    planner_llm,
+                    user_prompt=query,
+                    system_prompt=PLANNER_SYS.format(task=query),
+                    response_model=StructuredPlan
+                )
+                print_status(f"Plan generated with {len(plan.steps)} steps", Colors.GREEN)
+            except Exception as e:
+                print_status(f"Planning failed, proceeding without plan: {e}", Colors.YELLOW)
+        
+        # Step 3: Browser Setup
+        print_status("Step 3: Setting up browser", Colors.BLUE)
+        browser_profile = BrowserProfile(
+            user_data_dir=CHROME_PROFILE_DIR,
+            keep_alive=keep_browser_open,
+            headless=False,
+            wait_for_network_idle_page_load_time=3.0,
+            minimum_wait_page_load_time=0.5,
+            maximum_wait_page_load_time=8.0,
+            wait_between_actions=0.7,
+            default_timeout=10_000,
+            default_navigation_timeout=45_000,
         )
-        print_status(f"✅ Plan generated: {len(structured_plan.steps)} steps, {structured_plan.estimated_duration_minutes}min estimated", Colors.GREEN)
+        browser_session = BrowserSession(browser_profile=browser_profile)
         
-        # Convert structured plan back to text for the executor
-        plan_text = f"Task: {structured_plan.task_summary}\n\n"
-        plan_text += f"Success Criteria: {structured_plan.success_criteria}\n\n"
-        plan_text += "Steps:\n"
-        for step in structured_plan.steps:
-            plan_text += f"{step.step_number}. {step.action}\n"
-            plan_text += f"   Expected: {step.expected_outcome}\n"
-            if step.fallback_strategy:
-                plan_text += f"   Fallback: {step.fallback_strategy}\n"
-            plan_text += "\n"
+        # Step 4: Configure Task-Specific Agent
+        print_status("Step 4: Configuring agent for task type", Colors.BLUE)
         
-        current_plan = plan_text
+        # Get task-specific system prompt
+        task_system_prompt = TaskRouter.get_task_system_prompt(task_type)
         
-    except Exception as e:
-        print_status(f"⚠️  Structured planning failed, falling back to basic planning: {e}", Colors.YELLOW)
-        current_plan = await chat_once(planner_llm, user_prompt=query, system_prompt=PLANNER_SYS.format(task=query))
-        structured_plan = None
-
-    # ---- Generate Initial Structured Critique
-    print_status("Generating initial structured critique...", Colors.YELLOW)
-    try:
-        structured_critique = await structured_chat(
-            planner_llm,
-            user_prompt=f"Plan to evaluate:\n{current_plan}",
-            system_prompt=CRITIC_SYS,
-            response_model=StructuredCritique
-        )
+        # Set output schema only for data extraction tasks
+        output_schema = ExtractedData if task_type.requires_structured_output else None
+        if output_schema:
+            print_status("Structured output enabled for data extraction", Colors.BLUE)
         
-        if structured_critique.final_recommendation != "approve":
-            # Apply critique adjustments to the plan
-            current_plan = current_plan + "\n\n# Critic Adjustments\n"
-            for issue in structured_critique.issues_found:
-                if issue.severity in ["high", "critical"]:
-                    current_plan += f"- {issue.issue_type}: {issue.recommendation}\n"
-            
-        critique_summary = f"Assessment: {structured_critique.overall_assessment}, {len(structured_critique.issues_found)} issues found"
-        print_status(f"✅ {critique_summary}", Colors.GREEN if structured_critique.final_recommendation == "approve" else Colors.YELLOW)
+        # Build task description
+        if plan:
+            task_description = f"Task: {plan.task_summary}\n\nSuccess Criteria: {plan.success_criteria}\n\nSteps:\n"
+            for step in plan.steps:
+                task_description += f"{step.step_number}. {step.action}\n"
+        else:
+            task_description = query
         
-    except Exception as e:
-        print_status(f"⚠️  Structured critique failed, falling back to basic critique: {e}", Colors.YELLOW)
-        critique = await chat_once(planner_llm, user_prompt=f"Plan:\n{current_plan}", system_prompt=CRITIC_SYS)
-        if "OK" not in critique.strip().upper():
-            current_plan = current_plan + "\n\n# Critic adjustments\n" + critique
-        structured_critique = None
-
-    # ---- Configure Native Structured Output Schema
-    output_schema = None
-    data_extraction_keywords = ['extract', 'scrape', 'get data', 'find information', 'table', 'list', 'price', 'product', 'compare', 'search results']
-    
-    if any(keyword in query.lower() for keyword in data_extraction_keywords):
-        print_status("🔧 Configuring native structured data extraction schema...", Colors.BLUE)
-        output_schema = ExtractedData
-        print_status(f"   ✅ Using ExtractedData schema for structured output", Colors.GREEN)
-
-    # ---- Milestone-based Execution with Frequent Planner/Critic Check-ins
-    # Execution parameters
-    CHUNK_SIZE = 4  # Execute 4 steps, then reassess
-    MAX_MILESTONES = 8  # Maximum number of milestone chunks (32 total steps max)
-    
-    print_status("Starting milestone-based execution with frequent re-assessment...", Colors.YELLOW)
-    print_status(f"🎯 Milestone Strategy: {CHUNK_SIZE} steps per milestone, up to {MAX_MILESTONES} milestones", Colors.BLUE)
-    print_status("   ✅ Each milestone includes: Execute → Critique → Plan Adjustment → Continue", Colors.GREEN)
-    print()
-    
-    all_histories = []
-    milestone_count = 0
-    task_completed = False
-    replanning_count = 0
-    
-    while milestone_count < MAX_MILESTONES and not task_completed:
-        milestone_count += 1
-        print_status(f"\n{'='*60}", Colors.BLUE)
-        print_status(f"🎯 MILESTONE {milestone_count}/{MAX_MILESTONES} - Executing {CHUNK_SIZE} steps...", Colors.BOLD + Colors.BLUE)
-        print_status(f"{'='*60}\n", Colors.BLUE)
-        
-        # Create agent for this milestone chunk with aug23 playbook parameters
+        # Create agent with task-specific configuration
         agent = Agent(
-            task=current_plan,
+            task=task_description,
             llm=executor_llm,
-            planner_llm=planner_llm,  # Enable planner/executor strategy
             browser_session=browser_session,
             output_model_schema=output_schema,
-            max_steps=CHUNK_SIZE,
-            # Aug23 Playbook Parameters
-            max_actions_per_step=2,   # Controlled steps for reliability
-            max_failures=3,           # Robust failure handling
-            retry_delay=10,           # Patient retries
-            use_vision=True,          # Enable vision for better understanding
-            vision_detail_level="auto",  # Dynamic cost management
-            save_conversation_path=str(LOGS_DIR / "conversations"),  # Observability
-            extend_system_message="CRITICAL: Focus on immediate next steps. When extracting data, use structured output format. Prefer in-app viewers; avoid downloads; keep to the user's stated intent.\n\nCUSTOM ACTIONS AVAILABLE:\n\n1. 'search_web' - Fast & cheap web search via Serper API with browser fallback:\n   - Much cheaper than browser searches ($2 per 1000 vs $0.25 per search)\n   - Faster and more reliable than navigating to Google\n   - Automatically falls back to browser search if API fails\n   - Returns formatted results with titles, URLs, snippets\n   - Call with: search_web(query='your search terms', num_results=10)\n   - Use this instead of navigating to Google for research tasks\n\n2. 'fallback_extract_table' - Complete Tabular → Text → JSON pipeline:\n   - Extract: Try File→Download CSV (Google Sheets) → Select All→Copy clipboard → HTML table parsing\n   - Structure: Use LLM to map raw data to target schema (EventsSchema by default)\n   - Return: Structured JSON ready for use\n   - Call with: fallback_extract_table(want_fields=['date', 'time', 'event'], target_schema='EventsSchema')\n   - Works universally on any table/schedule across any site/app when normal extraction struggles"
+            max_steps=min(task_type.estimated_steps + 3, 20),  # Add buffer but cap at 20
+            max_actions_per_step=3,
+            max_failures=3,
+            retry_delay=8,
+            use_vision=True,
+            vision_detail_level="auto",
+            save_conversation_path=str(LOGS_DIR / "conversations"),
+            extend_system_message=task_system_prompt + " CUSTOM ACTIONS: 'search_web', 'fallback_extract_table' are available."
         )
-        
+
         # Register custom actions
         if hasattr(agent, 'controller') and agent.controller:
             await register_fallback_extraction_action(agent.controller, llm=executor_llm)
             await register_serper_search_action(agent.controller)
-        
-        try:
-            # Execute milestone chunk with Aug23 robustness hooks  
-            robustness = RobustnessManager(strong_model_name=STRONG_MODEL)
-            gatekeeper = HumanGatekeeper()
-            
-            # Human safety gate check before execution
-            if gatekeeper.requires_confirmation(current_plan):
-                print_status(f"🚨 Dangerous operation detected in milestone {milestone_count}", Colors.YELLOW)
-                if not gatekeeper.get_confirmation(f"Execute: {current_plan[:100]}...?"):
-                    print_status("❌ User cancelled dangerous operation", Colors.RED)
-                    break
-            
-            # Pre-execution hook
-            await robustness.on_step_start(agent, {"step_number": milestone_count, "action_type": "milestone_execution"})
-            
-            # Execute milestone chunk (keeping your original logic)
-            chunk_history: AgentHistoryList = await agent.run()
-            
-            # Post-execution hook for failure handling and model escalation
-            step_success = len(chunk_history) > 0 and all(
-                not hasattr(event, 'error') or not event.error 
-                for event in chunk_history
-            )
-            await robustness.on_step_end(agent, {"success": step_success})
-            
-            all_histories.append(chunk_history)
-            
-            # Assess progress with planner/critic
-            print_status("🔍 Assessing progress with planner/critic...", Colors.YELLOW)
-            progress = await assess_progress(planner_llm, query, current_plan, chunk_history)
-            
-            print_status(f"Progress: {progress.progress_percentage}% | Status: {progress.current_status[:50]}...", Colors.GREEN if progress.should_continue else Colors.YELLOW)
-            
-            # ---- NEW: Milestone Structured Critique Pass ----
-            print_status(f"🔍 Running milestone {milestone_count}/{MAX_MILESTONES} structured critique...", Colors.YELLOW)
-            try:
-                # Gather current state for critic
-                current_state = await gather_milestone_state(agent.controller if hasattr(agent, 'controller') else None, chunk_history)
-                
-                # Call structured critic to review execution
-                milestone_critique = await structured_chat(
-                    planner_llm,
-                    user_prompt=f"MILESTONE {milestone_count} CRITIQUE:\n\nOriginal Plan:\n{current_plan}\n\nProgress: {progress.progress_percentage}%\n\nCurrent Status: {progress.current_status}\n\nObstacles: {', '.join(progress.obstacles_encountered)}\n\nCurrent State:\n{current_state}\n\nRecent Execution Summary:\n{summarize_chunk_history(chunk_history)}",
-                    system_prompt=f"You are critiquing milestone {milestone_count}/{MAX_MILESTONES} execution. Analyze what's working, what's not, and provide specific recommendations for the next milestone. Focus on tactical adjustments rather than complete replanning.",
-                    response_model=StructuredCritique
-                )
-                
-                print_status(f"🔎 Milestone critique: {milestone_critique.overall_assessment} | {len(milestone_critique.issues_found)} issues | {milestone_critique.final_recommendation}", Colors.BLUE)
-                
-                # Apply high-priority critic recommendations to current plan
-                if milestone_critique.issues_found:
-                    high_priority_fixes = [issue for issue in milestone_critique.issues_found if issue.severity in ["high", "critical"]]
-                    if high_priority_fixes:
-                        print_status(f"🔧 Applying {len(high_priority_fixes)} critical/high priority fixes to plan", Colors.YELLOW)
-                        current_plan += f"\n\n# Milestone {milestone_count} Critical Adjustments:\n"
-                        for fix in high_priority_fixes:
-                            current_plan += f"- {fix.issue_type}: {fix.recommendation}\n"
-                        
-            except Exception as e:
-                print_status(f"⚠️  Milestone critique failed, continuing: {e}", Colors.YELLOW)
-            
-            # Check if task is completed
-            if progress.progress_percentage >= 95 or not progress.should_continue:
-                print_status(f"✅ Task completion detected! ({progress.progress_percentage}% progress)", Colors.GREEN)
-                task_completed = True
-                break
-                
-            # Handle replanning if needed
-            if progress.needs_replanning and replanning_count < 2:  # Limit replanning attempts
-                replanning_count += 1
-                print_status(f"🔄 Replanning needed (attempt {replanning_count}/2): {progress.next_milestone}", Colors.YELLOW)
-                
-                # Generate new plan based on current progress
-                replan_prompt = f"""Original task: {query}
 
-Current progress: {progress.progress_percentage}%
-Status: {progress.current_status}
-Obstacles: {', '.join(progress.obstacles_encountered)}
-Next milestone: {progress.next_milestone}
+        # Step 5: Execute with robustness hooks
+        print_status("Step 5: Executing task", Colors.BLUE)
+        robustness = RobustnessManager(strong_model_name=STRONG_MODEL)
+        from aug23_hooks import CostManager
+        cost_mgr = CostManager(cheap_model_name="gemini-2.5-flash")
 
-Generate a revised plan that addresses current obstacles and focuses on the next milestone."""
-                
-                try:
-                    new_structured_plan = await structured_chat(
-                        planner_llm,
-                        user_prompt=replan_prompt,
-                        system_prompt=PLANNER_SYS.format(task=query),
-                        response_model=StructuredPlan
-                    )
-                    
-                    # Update current plan
-                    current_plan = f"Revised Task: {new_structured_plan.task_summary}\n\n"
-                    current_plan += f"Success Criteria: {new_structured_plan.success_criteria}\n\n"
-                    current_plan += "Revised Steps:\n"
-                    for step in new_structured_plan.steps:
-                        current_plan += f"{step.step_number}. {step.action}\n"
-                        current_plan += f"   Expected: {step.expected_outcome}\n"
-                        if step.fallback_strategy:
-                            current_plan += f"   Fallback: {step.fallback_strategy}\n"
-                        current_plan += "\n"
-                    
-                    print_status(f"✅ Plan revised with {len(new_structured_plan.steps)} updated steps", Colors.GREEN)
-                    
-                except Exception as e:
-                    print_status(f"⚠️  Replanning failed, continuing with current plan: {e}", Colors.YELLOW)
-                    
-            # Handle fallback strategies
-            if progress.fallback_needed != "none":
-                print_status(f"🔄 Applying fallback strategy: {progress.fallback_needed}", Colors.YELLOW)
-                fallback_instruction = ""
-                
-                if progress.fallback_needed == "table_extraction":
-                    fallback_instruction = "\n\n# FALLBACK: Focus on table extraction - look for HTML tables, data grids, or structured content. Use built-in table parsing."
-                elif progress.fallback_needed == "simple_search":
-                    fallback_instruction = "\n\n# FALLBACK: Simplify approach - use basic search terms, focus on first few results, avoid complex interactions."
-                elif progress.fallback_needed == "manual_intervention":
-                    print_status("⚠️  Manual intervention may be needed - consider stopping here", Colors.YELLOW)
-                    
-                current_plan += fallback_instruction
-                
-        except Exception as e:
-            print_status(f"❌ Error in milestone {milestone_count}: {str(e)}", Colors.RED)
-            # Continue with next milestone if possible
-            continue
-    
-    # Combine all histories for final processing
-    if all_histories:
-        # Use the most recent history as primary, but combine usage stats
-        final_history = all_histories[-1]
-        
-        # Aggregate usage across all chunks if available
-        total_usage = None
-        for hist in all_histories:
-            if hasattr(hist, 'usage') and hist.usage:
-                if total_usage is None:
-                    total_usage = hist.usage
-                else:
-                    # Sum up the usage stats
-                    total_usage.total_prompt_tokens += hist.usage.total_prompt_tokens
-                    total_usage.total_completion_tokens += hist.usage.total_completion_tokens  
-                    total_usage.total_tokens += hist.usage.total_tokens
-                    total_usage.total_cost += hist.usage.total_cost
-        
-        if total_usage:
-            final_history.usage = total_usage
-    else:
-        # No execution occurred
-        final_history = None
-        
-    try:
-        if final_history:
-            # Convert execution history to structured format
-            print_status("Processing milestone execution results...", Colors.YELLOW)
-            structured_result = process_agent_history_to_structured_result(final_history, query)
+        await robustness.on_step_start(agent, {"step_number": 0, "action_type": "initial_execution"})
+        if cost_mgr.should_downshift(agent):
+            cost_mgr.downshift_model(agent)
 
-            # ---- Final structured critic pass on the outcome
-            print_status("Running final structured critic validation...", Colors.YELLOW)
+        history: AgentHistoryList = await agent.run()
+
+        step_success = len(history) > 0 and all(
+            not hasattr(event, 'error') or not event.error for event in history
+        )
+        await robustness.on_step_end(agent, {"success": step_success})
+
+        # Step 6: Process Results
+        print_status("Step 6: Processing results", Colors.BLUE)
+        structured_result = process_agent_history_to_structured_result(history, query)
+
+        # Step 7: Final Critique (if data extraction task)
+        critic_eval = None
+        if task_type.requires_structured_output or task_type.complexity != "simple":
+            print_status("Step 7: Running critic evaluation", Colors.BLUE)
             try:
                 final_critique = await structured_chat(
                     planner_llm,
-                    user_prompt=f"Original Plan:\n{current_plan}\n\nExecution Summary:\n{structured_result.summary}\n\nSuccess Rate: {structured_result.success_rate:.1f}%\n\nTask Completed: {structured_result.task_completed}\n\nMilestones: {milestone_count}",
+                    user_prompt=f"Task: {query}\n\nExecution Summary: {structured_result.summary}\n\nSuccess Rate: {structured_result.success_rate:.1f}%\n\nCompleted: {structured_result.task_completed}",
                     system_prompt=CRITIC_SYS,
                     response_model=StructuredCritique
                 )
-                critic_eval = f"Assessment: {final_critique.overall_assessment} | Issues: {len(final_critique.issues_found)} | Recommendation: {final_critique.final_recommendation} | Milestones: {milestone_count}"
-                
+                critic_eval = f"Assessment: {final_critique.overall_assessment} | Issues: {len(final_critique.issues_found)} | Recommendation: {final_critique.final_recommendation}"
             except Exception as e:
-                print_status(f"⚠️  Structured final critique failed, using basic critique: {e}", Colors.YELLOW)
-                critic_eval = await chat_once(
-                    planner_llm,
-                    user_prompt=f"Plan:\n{current_plan}\n\nOutcome:\n{structured_result.summary}",
-                    system_prompt=CRITIC_SYS
-                )
-                final_critique = None
+                print_status(f"Critic evaluation failed: {e}", Colors.YELLOW)
+                critic_eval = "Critic evaluation not available"
+        
+        # Step 8: Prepare output
+        cost_info = None
+        if getattr(history, "usage", None):
+            cost_info = {
+                "planner_model": PLANNER_MODEL,
+                "executor_model": EXECUTOR_MODEL,
+                "prompt_tokens": history.usage.total_prompt_tokens,
+                "completion_tokens": history.usage.total_completion_tokens,
+                "total_tokens": history.usage.total_tokens,
+                "estimated_cost": history.usage.total_cost,
+            }
 
-            # Use structured result as the final result
-            final_result = structured_result.summary
-
-            # Cost usage from browser-use
-            cost_info = None
-            if getattr(final_history, "usage", None):
-                cost_info = {
-                    "planner_model": PLANNER_MODEL,
-                    "executor_model": EXECUTOR_MODEL,
-                    "prompt_tokens": final_history.usage.total_prompt_tokens,
-                    "completion_tokens": final_history.usage.total_completion_tokens,
-                    "total_tokens": final_history.usage.total_tokens,
-                    "estimated_cost": final_history.usage.total_cost,
-                }
-        else:
-            # No execution occurred
-            structured_result = StructuredExecutionResult(
-                task_completed=False,
-                summary="No execution occurred due to initialization issues",
-                events=[],
-                final_data=None,
-                total_steps=0,
-                success_rate=0.0
-            )
-            critic_eval = "No execution to evaluate"
-            cost_info = None
-
-        # Compose structured log
-        result_text = f"## Structured Execution Result\n"
+        # Create result text
+        result_text = f"## Task Execution Result\n"
+        result_text += f"**Task Type:** {task_type.category} ({task_type.complexity})\n"
         result_text += f"**Task Completed:** {structured_result.task_completed}\n"
         result_text += f"**Success Rate:** {structured_result.success_rate:.1f}%\n"
         result_text += f"**Summary:** {structured_result.summary}\n\n"
@@ -1383,20 +1109,20 @@ Generate a revised plan that addresses current obstacles and focuses on the next
                 result_text += f"**Source:** {structured_result.final_data.source_url}\n"
             result_text += f"**Content:**\n```json\n{json.dumps(structured_result.final_data.content, indent=2)}\n```\n\n"
         
-        result_text += f"## Execution Events\n"
-        for event in structured_result.events[-5:]:  # Show last 5 events
-            result_text += f"- Step {event.step_number}: {event.action_taken}\n"
-            result_text += f"  Result: {event.result[:100]}{'...' if len(event.result) > 100 else ''}\n"
-            result_text += f"  Success: {'✅' if event.success else '❌'}\n"
-            if event.extracted_data:
-                result_text += f"  Data Type: {event.extracted_data.data_type}\n"
-            result_text += "\n"
+        if plan:
+            result_text += f"## Original Plan\n"
+            result_text += f"**Task:** {plan.task_summary}\n"
+            result_text += f"**Estimated Duration:** {plan.estimated_duration_minutes} minutes\n\n"
         
-        result_text += f"## Critic Evaluation\n{critic_eval}\n\n"
+        if critic_eval:
+            result_text += f"## Critic Evaluation\n{critic_eval}\n\n"
+        
         result_text += "## Execution Details\n"
+        result_text += f"- Task Type: {task_type.category}\n"
+        result_text += f"- Complexity: {task_type.complexity}\n"
         result_text += f"- Steps taken: {structured_result.total_steps}\n"
         result_text += f"- Successful actions: {int(structured_result.success_rate / 100 * structured_result.total_steps)}\n"
-        result_text += f"- Planner/Critic model: {PLANNER_MODEL}\n"
+        result_text += f"- Planner model: {PLANNER_MODEL}\n"
         result_text += f"- Executor model: {EXECUTOR_MODEL}\n"
         if cost_info:
             result_text += f"- Total tokens used: {cost_info['total_tokens']}\n"
@@ -1404,21 +1130,22 @@ Generate a revised plan that addresses current obstacles and focuses on the next
 
         log_file = save_query_log(query, result_text, cost_info)
 
-        print_status("✅ Structured query completed!", Colors.GREEN)
-        print_status(f"📄 Log saved to: {log_file}", Colors.GREEN)
+        print_status("Query completed!", Colors.GREEN)
+        print_status(f"Log saved to: {log_file}", Colors.GREEN)
         if cost_info:
-            print_status(f"💰 Estimated cost: ${cost_info['estimated_cost']:.4f}", Colors.YELLOW)
+            print_status(f"Estimated cost: ${cost_info['estimated_cost']:.4f}", Colors.YELLOW)
 
-        # Console display with structured data
-        print(f"\n{Colors.BOLD}📊 Structured Execution Result:{Colors.END}")
+        # Console display
+        print(f"\n{Colors.BOLD}Task Execution Result:{Colors.END}")
         print("-" * 50)
-        print(f"Task Completed: {'✅ Yes' if structured_result.task_completed else '❌ No'}")
+        print(f"Task Type: {task_type.category} ({task_type.complexity})")
+        print(f"Task Completed: {'Yes' if structured_result.task_completed else 'No'}")
         print(f"Success Rate: {structured_result.success_rate:.1f}%")
         print(f"Steps: {structured_result.total_steps}")
         print(f"Summary: {structured_result.summary}")
         
         if structured_result.final_data:
-            print(f"\n{Colors.BOLD}📋 Extracted Data ({structured_result.final_data.data_type}):{Colors.END}")
+            print(f"\n{Colors.BOLD}Extracted Data ({structured_result.final_data.data_type}):{Colors.END}")
             print("-" * 30)
             content_str = json.dumps(structured_result.final_data.content, indent=2)
             if len(content_str) > 300:
@@ -1427,13 +1154,14 @@ Generate a revised plan that addresses current obstacles and focuses on the next
                 print(content_str)
         print("-" * 50)
 
-        print(f"\n{Colors.BOLD}🔍 Critic Assessment:{Colors.END}")
-        print("-" * 30)
-        if len(critic_eval) > 200:
-            print(critic_eval[:200] + "...\n[Full evaluation saved to log file]")
-        else:
-            print(critic_eval)
-        print("-" * 30)
+        if critic_eval and len(critic_eval) > 20:
+            print(f"\n{Colors.BOLD}Critic Assessment:{Colors.END}")
+            print("-" * 30)
+            if len(critic_eval) > 200:
+                print(critic_eval[:200] + "...\n[Full evaluation saved to log file]")
+            else:
+                print(critic_eval)
+            print("-" * 30)
 
         if keep_browser_open:
             print(f"\n{Colors.YELLOW}Browser is still open. You can interact with it.{Colors.END}")
@@ -1443,8 +1171,11 @@ Generate a revised plan that addresses current obstacles and focuses on the next
         return True
 
     except Exception as e:
-        print_status(f"❌ Error: {str(e)}", Colors.RED)
-        await browser_session.kill()
+        print_status(f"Error during execution: {str(e)}", Colors.RED)
+        try:
+            await browser_session.kill()
+        except:
+            pass
         return False
 
 # ----------------------------
@@ -1460,26 +1191,26 @@ async def main():
     if not os.getenv('ANTHROPIC_API_KEY'):
         missing.append('ANTHROPIC_API_KEY (escalation: claude-3-5-sonnet)')
     if missing:
-        print_status("❌ Missing required API keys for aug23 model strategy:", Colors.RED)
+        print_status("Missing required API keys for aug23 model strategy:", Colors.RED)
         for k in missing:
             print_status(f"  - {k}", Colors.YELLOW)
         print_status("Add them to your .env and rerun.", Colors.YELLOW)
         return
 
-    print(f"📁 Logs will be saved to: {LOGS_DIR.absolute()}")
-    print(f"🌐 Using Chrome profile: {CHROME_PROFILE_DIR}")
-    print(f"\n{Colors.GREEN}🚀 Structured Output Features Enabled:{Colors.END}")
-    print(f"  • Plans: JSON schema with steps, success criteria & fallbacks")
-    print(f"  • Critiques: Structured issue assessment with severity levels")
-    print(f"  • Extraction: Automatic JSON formatting for tables & data")
-    print(f"  • Events: Complete execution history with success tracking")
-    print(f"  • Validation: Auto-retry on invalid JSON responses\n")
+    print(f"Logs will be saved to: {LOGS_DIR.absolute()}")
+    print(f"Using Chrome profile: {CHROME_PROFILE_DIR}")
+    print(f"\n{Colors.GREEN}Task Router Features:{Colors.END}")
+    print(f"  * Automatic task classification (data_extraction, research, navigation, transaction)")
+    print(f"  * Task-specific system prompts and configurations")
+    print(f"  * Structured output only for data extraction tasks")
+    print(f"  * Planning only for moderate/complex tasks")
+    print(f"  * Simplified execution flow with robustness hooks\n")
 
     while True:
         print(f"\n{Colors.BOLD}Enter your query (or 'quit' to exit):{Colors.END}")
         query = input(f"{Colors.GREEN}> {Colors.END}").strip()
         if query.lower() in ('quit', 'exit', 'q'):
-            print_status("Goodbye! 👋", Colors.BLUE)
+            print_status("Goodbye!", Colors.BLUE)
             break
         if not query:
             print_status("Please enter a valid query", Colors.YELLOW)
