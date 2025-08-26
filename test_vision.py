@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for VisionStateBuilder with Llava-Phi3
+Test script for VisionStateBuilder with Moondream2
 """
 
 import asyncio
@@ -13,7 +13,7 @@ import sys
 # Add the current directory to sys.path so we can import hybrid_agent
 sys.path.insert(0, str(Path(__file__).parent))
 
-from hybrid_agent import VisionStateBuilder, resolve_llava_phi3_tag
+from hybrid_agent import VisionStateBuilder, resolve_moondream_tag
 
 async def create_test_screenshot():
     """Create a simple test screenshot with some UI elements."""
@@ -56,7 +56,7 @@ async def create_test_screenshot():
 
 async def test_vision_state_builder():
     """Test the VisionStateBuilder with a sample screenshot."""
-    print("🧪 Testing VisionStateBuilder with Llava-Phi3...")
+    print("🧪 Testing VisionStateBuilder with Moondream2...")
     
     # Create test screenshot
     screenshot_path = await create_test_screenshot()
@@ -64,7 +64,7 @@ async def test_vision_state_builder():
     
     try:
         # Resolve model tag first
-        model_tag = await resolve_llava_phi3_tag()
+        model_tag = await resolve_moondream_tag()
         print(f"🏷️ Using model tag: {model_tag}")
         
         # Initialize vision builder
@@ -73,7 +73,7 @@ async def test_vision_state_builder():
             model_name=model_tag
         )
         
-        print("🔍 Analyzing screenshot with Llava-Phi3...")
+        print("🔍 Analyzing screenshot with Moondream2...")
         
         # Build vision state
         vision_state = await vision_builder.build_vision_state(

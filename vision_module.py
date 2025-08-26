@@ -16,6 +16,40 @@ import httpx
 from pydantic import BaseModel, Field
 
 
+def _to_base64_jpeg(path: str, max_dim: int = 1024, quality: int = 80) -> str:
+    """Convert image to optimized base64 JPEG with resizing.
+    
+    Args:
+        path: Path to image file
+        max_dim: Maximum dimension (width or height) in pixels
+        quality: JPEG quality (1-100)
+        
+    Returns:
+        Base64 encoded JPEG string
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        # Fallback: raw file to base64 (slower, bigger)
+        import base64, pathlib
+        return base64.b64encode(pathlib.Path(path).read_bytes()).decode()
+
+    import io, base64
+    img = Image.open(path).convert("RGB")
+    w, h = img.size
+    if max(w, h) > max_dim:
+        if w >= h:
+            nh = int(h * (max_dim / float(w)))
+            img = img.resize((max_dim, nh))
+        else:
+            nw = int(w * (max_dim / float(h)))
+            img = img.resize((nw, max_dim))
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 # ----------------------------
 # VisionState Schema
 # ----------------------------
@@ -52,6 +86,9 @@ class VisionMeta(BaseModel):
     title: str = Field(description="Page title", default="")
     scrollY: int = Field(description="Vertical scroll position", default=0)
     timestamp: str = Field(description="ISO8601 timestamp of capture", default_factory=lambda: datetime.now().isoformat())
+    model_name: str = Field(description="Vision model used", default="unknown")
+    confidence: float = Field(description="Overall analysis confidence", default=0.5)
+    processing_time: float = Field(description="Processing time in seconds", default=0.0)
 
 
 class VisionState(BaseModel):
@@ -75,7 +112,7 @@ class VisionAnalyzer:
         
         Args:
             endpoint: Ollama API endpoint
-            model_name: Llava-Phi3 model name (auto-resolved if None)
+            model_name: Moondream2 model name (auto-resolved if None)
         """
         self.endpoint = endpoint
         self.model_name = model_name
@@ -100,8 +137,8 @@ class VisionAnalyzer:
             self._ollama_available = False
             return False
     
-    async def resolve_llava_phi3_tag(self) -> str:
-        """Resolve Llava-Phi3 tag by querying Ollama API and return the exact model tag."""
+    async def resolve_moondream_tag(self) -> str:
+        """Resolve Moondream2 tag by querying Ollama API and return the exact model tag."""
         try:
             print(f"[VisionAnalyzer] Resolving model tags from {self.endpoint}")
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -113,60 +150,70 @@ class VisionAnalyzer:
                     
                     for model in data.get('models', []):
                         model_name = model.get('name', '')
-                        if 'llava-phi3' in model_name.lower():
-                            print(f"[VisionAnalyzer] Found Llava-Phi3 model: {model_name}")
+                        if 'moondream' in model_name.lower():
+                            print(f"[VisionAnalyzer] Found Moondream model: {model_name}")
                             # Return the exact tag as reported by Ollama
-                            return model_name or "llava-phi3:latest"
+                            return model_name or "moondream:latest"
                     
-                    print(f"[VisionAnalyzer] No Llava-Phi3 model found, using default")
-                    return "llava-phi3:latest"
+                    print(f"[VisionAnalyzer] No Moondream model found, using default")
+                    return "moondream:latest"
                 else:
                     print(f"[VisionAnalyzer] Failed to get models: HTTP {response.status_code}")
-                    return "llava-phi3:latest"
+                    return "moondream:latest"
         except Exception as e:
             print(f"[VisionAnalyzer] Error resolving models: {type(e).__name__}: {e}")
-            return "llava-phi3:latest"
+            return "moondream:latest"
     
     def build_vision_prompt(self) -> str:
-        """Build the vision analysis prompt."""
-        return """Analyze this screenshot and extract UI elements as JSON.
+        """Build the richer vision analysis prompt prioritizing key elements."""
+        return """Analyze this webpage screenshot and identify up to 12 key interactive elements. Prioritize search boxes, price displays, cart/checkout buttons, zip code fields, and cookie/banner buttons.
 
-Find buttons, links, input fields, text, and interactive elements. Return JSON only:
+Respond with a JSON object (not array) in this exact format:
 
 {
-  "caption": "Brief description of the page",
+  "caption": "brief page description",
   "elements": [
     {
-      "role": "button|link|text|input|other",
-      "visible_text": "text shown", 
-      "attributes": {},
-      "selector_hint": "element description",
-      "bbox": [0, 0, 0, 0],
-      "confidence": 0.8
+      "role": "button|link|text|input|image|other",
+      "visible_text": "exact text shown",
+      "attributes": {"type": "search", "placeholder": "search hint"},
+      "selector_hint": "input[type='search']",
+      "bbox": [x, y, width, height],
+      "confidence": 0.9
     }
   ],
   "fields": [
     {
-      "name_hint": "field name",
-      "value_hint": "current value", 
-      "bbox": [0, 0, 0, 0],
+      "name_hint": "search|email|zip|address",
+      "value_hint": "current value if visible",
+      "bbox": [x, y, width, height],
       "editable": true
     }
   ],
   "affordances": [
     {
-      "type": "button|link|tab|menu",
-      "label": "element label",
-      "selector_hint": "how to find it",
-      "bbox": [0, 0, 0, 0]
+      "type": "button|link|tab|menu|icon",
+      "label": "Search|Add to Cart|Checkout|Accept Cookies",
+      "selector_hint": "button:contains('Search')",
+      "bbox": [x, y, width, height]
     }
   ]
-}"""
+}
+
+PRIORITY ELEMENTS (find these first):
+- Search inputs (type=search, placeholder contains "search")
+- Price displays ($X.XX, pricing info)
+- Cart/checkout buttons ("Add to Cart", "Checkout", shopping cart icons)
+- Zip code/location fields (zip, postal, location)
+- Cookie/banner buttons ("Accept", "Agree", "Got it", "Close", "X")
+- Navigation menus and primary action buttons
+
+Return only the JSON object, no extra text."""
     
-    async def call_llava_phi3(self, prompt: str, image_b64: str) -> Dict[str, Any]:
-        """Call Llava-Phi3 via Ollama API with robust error handling."""
+    async def call_moondream(self, prompt: str, image_b64: str) -> Dict[str, Any]:
+        """Call Moondream2 via Ollama API with robust error handling."""
         if not self.model_name:
-            self.model_name = await self.resolve_llava_phi3_tag()
+            self.model_name = await self.resolve_moondream_tag()
             print(f"[VisionAnalyzer] Resolved model name: {self.model_name}")
         
         payload = {
@@ -174,23 +221,27 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             "prompt": prompt,
             "images": [image_b64],
             "stream": False,
-            "format": "json",
-            "keep_alive": 600,  # keep the model hot
-            "options": {"temperature": 0.1}
+            "keep_alive": 300,  # keep the model hot but not too long
+            "options": {
+                "temperature": 0.0,  # Deterministic for speed
+                "num_predict": 512,  # Allow more tokens for richer JSON
+                "top_k": 10,  # Slightly more sampling for better JSON
+                "top_p": 0.9   # Better token selection
+            }
         }
         
-        print(f"[VisionAnalyzer] Calling Llava-Phi3 at {self.endpoint} with model {self.model_name}")
+        print(f"[VisionAnalyzer] Calling Moondream2 at {self.endpoint} with model {self.model_name}")
         print(f"[VisionAnalyzer] Image size: {len(image_b64)} characters")
         
         try:
-            # Use shorter timeout to fail fast if ollama is not running
-            timeout_config = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=10.0)
-            async with httpx.AsyncClient(timeout=timeout_config) as client:
-                # httpx enables keep-alive by default; explicit header for clarity
+            # Increased timeout for reliable local processing
+            timeout = httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=60.0)
+            limits  = httpx.Limits(max_keepalive_connections=2, max_connections=4)
+            
+            async with httpx.AsyncClient(timeout=timeout, limits=limits, headers={"Connection": "keep-alive"}) as client:
                 response = await client.post(
                     f"{self.endpoint}/api/generate",
-                    json=payload,
-                    headers={"Connection": "keep-alive"}
+                    json=payload
                 )
                 
                 print(f"[VisionAnalyzer] Response status: {response.status_code}")
@@ -243,36 +294,82 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             print(f"[VisionAnalyzer] Unexpected error: {type(e).__name__}: {e}")
             raise
     
+    def _extract_first_json(self, text: str) -> str:
+        """Extract the first valid JSON object or array from text."""
+        # Try to find JSON object first
+        start_idx = text.find('{')
+        if start_idx != -1:
+            brace_count = 0
+            for i, char in enumerate(text[start_idx:], start_idx):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        return text[start_idx:i+1]
+        
+        # Try to find JSON array
+        start_idx = text.find('[')
+        if start_idx != -1:
+            bracket_count = 0
+            for i, char in enumerate(text[start_idx:], start_idx):
+                if char == '[':
+                    bracket_count += 1
+                elif char == ']':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        return text[start_idx:i+1]
+        
+        # Fallback to original text
+        return text.strip()
+
     def parse_vision_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """Parse vision response from Llava-Phi3 with robust error handling."""
+        """Parse vision response from Moondream2 with robust error handling."""
         try:
             response_text = response.get('response', '{}')
             print(f"[VisionAnalyzer] Raw response length: {len(response_text)} chars")
             print(f"[VisionAnalyzer] Response preview: {response_text[:200]}...")
             
-            # Extract JSON from response
-            start_idx = response_text.find('{')
-            end_idx = response_text.rfind('}') + 1
-            
-            if start_idx != -1 and end_idx > start_idx:
-                json_text = response_text[start_idx:end_idx]
-            else:
-                json_text = response_text
-            
+            # Extract first valid JSON object from response
+            json_text = self._extract_first_json(response_text)
             print(f"[VisionAnalyzer] Extracted JSON length: {len(json_text)} chars")
             
             vision_data = json.loads(json_text)
             print(f"[VisionAnalyzer] Successfully parsed JSON response")
             
-            # Validate and set defaults
-            if not isinstance(vision_data, dict):
-                print(f"[VisionAnalyzer] Response is not a dict, using empty dict")
+            # Handle case where model returns array instead of object
+            if isinstance(vision_data, list):
+                print(f"[VisionAnalyzer] Model returned array, converting to object format")
+                vision_data = {
+                    "caption": "UI screenshot with interactive elements",
+                    "elements": vision_data,  # Use the array as elements
+                    "fields": [],
+                    "affordances": []
+                }
+            elif not isinstance(vision_data, dict):
+                print(f"[VisionAnalyzer] Response is not a dict or array, using empty dict")
                 vision_data = {}
                 
             vision_data.setdefault('elements', [])
             vision_data.setdefault('fields', [])
             vision_data.setdefault('affordances', [])
             vision_data.setdefault('caption', 'UI screenshot analysis')
+            
+            # Convert bbox coordinates from floats to integers and fix attributes
+            for element in vision_data.get('elements', []):
+                if 'bbox' in element and isinstance(element['bbox'], list):
+                    element['bbox'] = [int(float(x)) for x in element['bbox']]
+                # Fix attributes if it's an array instead of dict
+                if 'attributes' in element and isinstance(element['attributes'], list):
+                    element['attributes'] = {}
+            
+            for field in vision_data.get('fields', []):
+                if 'bbox' in field and isinstance(field['bbox'], list):
+                    field['bbox'] = [int(float(x)) for x in field['bbox']]
+                    
+            for affordance in vision_data.get('affordances', []):
+                if 'bbox' in affordance and isinstance(affordance['bbox'], list):
+                    affordance['bbox'] = [int(float(x)) for x in affordance['bbox']]
             
             print(f"[VisionAnalyzer] Found {len(vision_data.get('elements', []))} elements, {len(vision_data.get('fields', []))} fields, {len(vision_data.get('affordances', []))} affordances")
             
@@ -306,24 +403,8 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             if not screenshot_file.exists():
                 raise FileNotFoundError(f"Screenshot not found: {screenshot_path}")
             
-            # Downsize to ~1280px width JPEG quality ~80
-            try:
-                from PIL import Image  # pillow
-                with Image.open(screenshot_file) as img:
-                    img = img.convert("RGB")
-                    max_width = 1280
-                    if img.width > max_width:
-                        new_height = int(img.height * (max_width / img.width))
-                        img = img.resize((max_width, new_height))
-                    import io
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=80, optimize=True)
-                    image_bytes = buf.getvalue()
-            except Exception:
-                # Fallback to raw file bytes if PIL not available
-                image_bytes = screenshot_file.read_bytes()
-            
-            image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+            # Use optimized JPEG conversion with 512px max dimension and better quality
+            image_b64 = _to_base64_jpeg(screenshot_path, max_dim=512, quality=60)
             
             # Ensure Ollama is available - fail fast if not
             if not await self.check_ollama_availability():
@@ -332,9 +413,9 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
                     "Please run: python ollama_manager.py --setup"
                 )
 
-            # Call Llava-Phi3
+            # Call Moondream2
             prompt = self.build_vision_prompt()
-            response = await self.call_llava_phi3(prompt, image_b64)
+            response = await self.call_moondream(prompt, image_b64)
             
             # Parse response
             vision_data = self.parse_vision_response(response)
@@ -349,7 +430,10 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
                     url=page_url,
                     title=page_title,
                     scrollY=0,
-                    timestamp=datetime.now().isoformat()
+                    timestamp=datetime.now().isoformat(),
+                    model_name=self.model_name or "moondream:latest",
+                    confidence=0.8,
+                    processing_time=0.0
                 )
             )
             
@@ -359,7 +443,13 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             # Return fallback VisionState on any error
             return VisionState(
                 caption=f"Vision analysis failed: {str(e)[:100]}",
-                meta=VisionMeta(url=page_url, title=page_title)
+                meta=VisionMeta(
+                    url=page_url, 
+                    title=page_title,
+                    model_name="fallback",
+                    confidence=0.0,
+                    processing_time=0.0
+                )
             )
 
 

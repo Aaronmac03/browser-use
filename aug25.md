@@ -8,7 +8,7 @@
 - ✅ Uses Browser-Use 0.6.1 to launch browser
 - ✅ Navigates to google.com 
 - ✅ Captures screenshot using CDP via ScreenshotEvent
-- ✅ Sends screenshot to Llava-Phi3 via Ollama
+- ✅ Sends screenshot to Moondream2 via Ollama
 - ✅ Prints vision analysis response (with fallback handling)
 - ✅ Parses response into structured VisionState
 - ✅ Prints final VisionState object
@@ -97,7 +97,7 @@ class VisionAnalyzer:
 
 ```python
 """
-Minimal test script for Llava-Phi3 vision analysis with Browser-Use 0.6.1
+Minimal test script for Moondream2 vision analysis with Browser-Use 0.6.1
 Goal: Get vision working in isolation before integrating into main agent
 """
 
@@ -105,7 +105,7 @@ Goal: Get vision working in isolation before integrating into main agent
 # 1. Launch browser using Browser-Use 0.6.1 (CDP-based)
 # 2. Navigate to test page
 # 3. Capture screenshot via CDP
-# 4. Send to Llava-Phi3 on localhost:11434
+# 4. Send to Moondream2 on localhost:11434
 # 5. Parse response into VisionState
 # 6. Print results
 
@@ -129,7 +129,7 @@ Goal: Get vision working in isolation before integrating into main agent
 2. **Ollama Integration:**
    - Endpoint: `http://localhost:11434/api/generate`
    - Model: Get actual tag via `/api/tags` endpoint first
-   - Format: `{"model": "llava-phi3:latest", "prompt": "...", "images": ["base64..."], "format": "json"}`
+   - Format: `{"model": "moondream:latest", "prompt": "...", "images": ["base64..."], "format": "json"}`
 
 3. **VisionState Schema** (from hybrid_brief.md):
    - caption, elements[], fields[], affordances[], meta
@@ -147,7 +147,7 @@ Goal: Get vision working in isolation before integrating into main agent
 ### **Your Mission:**
 Create a minimal, working `test_vision.py` that successfully:
 1. Captures a screenshot using Browser-Use 0.6.1's CDP interface
-2. Sends it to Llava-Phi3 running on Ollama (already verified running)
+2. Sends it to Moondream2 running on Ollama (already verified running)
 3. Parses the response into a VisionState object
 4. Prints clear success indicators
 
@@ -167,7 +167,7 @@ python test_vision.py
 ✅ Browser launched
 ✅ Navigated to https://www.google.com
 ✅ Screenshot captured: test_screenshot.png
-✅ Llava-Phi3 responded (took 2.3s)
+✅ Moondream2 responded (took 2.3s)
 ✅ VisionState created:
    Caption: "Google search page with..."
    Elements: 8

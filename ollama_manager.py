@@ -18,7 +18,7 @@ import platform
 class OllamaManager:
 	"""Manages Ollama service lifecycle and model availability."""
 	
-	def __init__(self, endpoint: str = "http://localhost:11434", model: str = "llava-phi3:latest"):
+	def __init__(self, endpoint: str = "http://localhost:11434", model: str = "moondream:latest"):
 		self.endpoint = endpoint
 		self.model = model
 		self.required_models = [model]
@@ -294,7 +294,7 @@ async def main():
 	parser = argparse.ArgumentParser(description="Ollama Manager for Browser-Use")
 	parser.add_argument("--setup", action="store_true", help="Complete Ollama setup")
 	parser.add_argument("--health", action="store_true", help="Health check")
-	parser.add_argument("--model", default="llava-phi3:latest", help="Model to use")
+	parser.add_argument("--model", default="moondream:latest", help="Model to use")
 	
 	args = parser.parse_args()
 	

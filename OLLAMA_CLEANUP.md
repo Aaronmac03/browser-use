@@ -11,7 +11,7 @@ python setup_ollama.py
 This will automatically:
 - Check if Ollama is installed
 - Start the service if needed  
-- Pull the required `llava-phi3:latest` model
+- Pull the required `moondream:latest` model
 - Remove old MiniCPM-V models to free space
 - Verify everything is working
 
@@ -31,7 +31,7 @@ ollama serve
 
 ### 3. Install Required Model
 ```bash
-ollama pull llava-phi3:latest
+ollama pull moondream
 ```
 
 ### 4. Remove Old Models (Optional)
@@ -63,12 +63,12 @@ python ollama_manager.py --setup
 python ollama_manager.py --health
 
 # Use custom model
-python ollama_manager.py --setup --model llava:latest
+python ollama_manager.py --setup --model moondream:latest
 ```
 
 ## Files Updated
 
-The following files have been updated to use `llava-phi3:latest`:
+The following files have been updated to use `moondream:latest`:
 
 - `hybrid_agent.py` - Main agent configuration
 - `vision_module.py` - Vision analysis module  
@@ -92,7 +92,7 @@ A: Run `python setup_ollama.py` to automatically fix the setup
 A: Ensure Ollama service is running: `ollama serve`
 
 **Q: Model not found errors**
-A: Pull the required model: `ollama pull llava-phi3:latest`
+A: Pull the required model: `ollama pull moondream`
 
 **Q: Out of disk space**
 A: Remove old models: `python ollama_manager.py --setup` (includes cleanup)

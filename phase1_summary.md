@@ -8,7 +8,7 @@
 - ✅ Uses Browser-Use 0.6.1 to launch browser
 - ✅ Navigates to google.com 
 - ✅ Captures screenshot using CDP via ScreenshotEvent
-- ✅ Sends screenshot to Llava-Phi3 via Ollama
+- ✅ Sends screenshot to Moondream2 via Ollama
 - ✅ Prints vision analysis response (with fallback handling)
 - ✅ Parses response into structured VisionState
 - ✅ Prints final VisionState object
@@ -72,7 +72,7 @@ class VisionAnalyzer:
 
 ### **Key Achievements:**
 - 🚀 Browser-Use 0.6.1 CDP integration working
-- 🔍 Llava-Phi3 Ollama integration implemented
+- 🔍 Moondream2 Ollama integration implemented
 - 🛡️ Robust error handling and fallback mechanisms
 - 📐 Complete VisionState schema with proper defaults  
 - 🧪 All test scripts pass with graceful degradation
