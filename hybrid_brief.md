@@ -1,53 +1,49 @@
 # Implementation Brief — Hybrid Local-Vision + Cloud-Reasoning
 
-## 🎯 **STATUS UPDATE (Latest)**
+## 🎯 **ACTUAL STATUS** (See ACTUAL_IMPLEMENTATION_STATUS.md for honest assessment)
 
 ### ✅ **COMPLETED** 
-- **Core Architecture**: Full `hybrid_agent.py` with all major components implemented
-- **Data Models**: Complete Pydantic schemas for VisionState, Action, PlannerRequest/Response, HistoryStep
-- **Local Action Execution**: Comprehensive local handlers for click, type, scroll, navigate actions with fallback strategies
-- **Cloud Integration**: CloudPlannerClient with Gemini 2.0 Flash integration and structured output
-- **Handoff Manager**: Intelligent routing between local/cloud with failure tracking and escalation logic
-- **Browser Integration**: Full browser-use session management and controller integration
-- **Error Handling**: Robust exception handling with multiple fallback strategies per action type
-- **CLI Interface**: Complete command-line interface with task execution loop
-- **Local VLM wired via Ollama (Moondream2)**: VisionStateBuilder returns caption/elements/fields/affordances; both tests passing
+- **Core Architecture**: `hybrid_agent.py` file structure exists with method stubs
+- **Emergency Fallback**: Basic generic response system (30% confidence)
+- **Data Models**: Pydantic schemas defined but minimal functionality
 
-### ✅ **COMPLETED** 
-- **Testing**: Basic functionality confirmed, but full end-to-end workflow testing needed
-- **Local Vision Setup**: Complete integration with Moondream2 via Ollama with all critical issues resolved
+### ⚠️ **PARTIALLY WORKING**
+- **Browser Integration**: Browser-use session management works
+- **CLI Interface**: Command-line interface exists but limited functionality
 
-### ❌ **REMAINING**
-- **selector_hint quality**: Improve CSS/XPath selector generation from vision analysis
-- **Visual diff caching**: Optimize repeated screenshot processing 
-- **Visual diff optimization**: Change detection between screenshots   
-- **Acceptance fixtures**: Login, search, comparison, ambiguity, failure recovery scenarios
+### ❌ **NOT WORKING** 
+- **Local Vision Models**: Ollama/Moondream not properly integrated 
+- **Cloud Integration**: Has bugs (missing `_check_cache` method)
+- **Local Action Execution**: Architecture exists but unreliable
+- **Vision Analysis**: Only returns generic fallback responses
+- **End-to-End Testing**: Most functionality untested/non-working
 
 ---
 
-## 📊 **LOCAL VISION SYSTEM STATUS - COMPLETE ✅**
+## 📊 **LOCAL VISION SYSTEM STATUS - NOT WORKING ❌**
 
-### **Performance Metrics**
-- **Response Time**: 8-10 seconds per vision analysis
-- **Success Rate**: 100% with robust fallback handling  
-- **Model**: Moondream:latest (local, CPU-based)
-- **Image Processing**: 256px max dimension, 40% JPEG quality for speed
-- **Timeout**: 60 seconds (conservative for reliability)
+### **Performance Metrics** (Based on ACTUAL_IMPLEMENTATION_STATUS.md)
+- **Response Time**: Only emergency fallback works (~1 second)
+- **Success Rate**: Only 30% confidence generic responses  
+- **Model**: Moondream not properly integrated (Ollama not installed)
+- **Vision Analysis**: Emergency fallback only, no actual vision processing
 
-### **Issues Resolved**
+### **Issues NOT Resolved**
 
-#### 1. Ollama Service Issues ✅
-- **Problem**: Model stuck in overloaded state causing timeouts
-- **Solution**: Completely restarted Ollama service, cleared stuck processes
-- **Result**: Model now responds consistently in ~8 seconds
+#### 1. Ollama Service Issues ❌
+- **Problem**: Ollama not properly installed or configured
+- **Status**: Still not working
+- **Result**: Only emergency fallback operational
 
-#### 2. JSON Format Constraint ✅  
-- **Problem**: Using `"format": "json"` parameter caused 60+ second timeouts
-- **Solution**: Removed format constraint, used prompt-based JSON instruction instead
-- **Result**: Dramatically improved response times (60s → 8s)
+#### 2. Vision Model Integration ❌  
+- **Problem**: Local vision models not actually working
+- **Status**: Architecture exists but no functional integration
+- **Result**: Only generic responses, no actual vision processing
 
-#### 3. Malformed JSON Responses ✅
-- **Problem**: Model returned arrays instead of objects, multiple JSON objects in response
+#### 3. End-to-End Functionality ❌
+- **Problem**: System only works at emergency fallback level
+- **Status**: Most claimed functionality is non-operational
+- **Result**: ~15% actual completion vs claimed 80-100%
 - **Solution**: Implemented robust JSON extraction with brace/bracket counting algorithm
 - **Result**: Successfully parses first valid JSON structure from any response format
 
