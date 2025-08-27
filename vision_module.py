@@ -6,6 +6,7 @@ Provides simple interface: VisionAnalyzer.analyze(screenshot_path) -> VisionStat
 Based on successful Phase 1 implementation from aug25.md.
 """
 
+import asyncio
 import base64
 import json
 import time
@@ -213,7 +214,7 @@ class VisionAnalyzer:
             print(f"[VisionAnalyzer] BLOCKED: Vision calls blocked for {self.circuit_breaker['recovery_time']}s")
     
     async def _force_model_cleanup(self) -> None:
-        """Reset model context to prevent state accumulation - keeps model loaded."""
+        """Enhanced model cleanup with context reset and performance monitoring."""
         try:
             # Send minimal context reset request
             cleanup_payload = {
@@ -237,6 +238,47 @@ class VisionAnalyzer:
         except Exception as e:
             # Non-critical - just log warning  
             print(f"[VisionAnalyzer] Context reset failed: {e}")
+    
+    async def _restart_model_if_degraded(self) -> bool:
+        """Restart model if performance has degraded significantly."""
+        try:
+            # Check if model performance is degraded
+            success_rate = (self.performance_stats['successful_calls'] / 
+                          max(1, self.performance_stats['total_calls']))
+            
+            # If success rate is below 30% and we've had multiple failures, restart
+            if (success_rate < 0.3 and 
+                self.performance_stats['total_calls'] > 3 and
+                self.circuit_breaker['consecutive_failures'] >= 3):
+                
+                print(f"[VisionAnalyzer] Model performance degraded (success rate: {success_rate:.1%})")
+                print(f"[VisionAnalyzer] Attempting model restart...")
+                
+                # Unload model completely
+                unload_payload = {
+                    "model": self.model_name,
+                    "keep_alive": 0  # Unload immediately
+                }
+                
+                timeout = httpx.Timeout(connect=2.0, read=5.0, write=2.0, pool=5.0)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    await client.post(f"{self.endpoint}/api/generate", json=unload_payload)
+                
+                # Wait a moment for unload
+                await asyncio.sleep(2)
+                
+                # Reset performance stats for fresh start
+                self.performance_stats['consecutive_failures'] = 0
+                self.circuit_breaker['consecutive_failures'] = 0
+                self.circuit_breaker['is_open'] = False
+                
+                print(f"[VisionAnalyzer] Model restart completed")
+                return True
+                
+        except Exception as e:
+            print(f"[VisionAnalyzer] Model restart failed: {e}")
+            
+        return False
     
     def build_vision_prompt(self) -> str:
         """Build the richer vision analysis prompt prioritizing key elements."""
@@ -292,6 +334,10 @@ Return ONLY the complete JSON object. No extra text before or after."""
         if not self._check_circuit_breaker():
             raise Exception(f"Circuit breaker open - vision temporarily disabled for performance")
         
+        # Check if model needs restart due to degraded performance
+        if await self._restart_model_if_degraded():
+            print(f"[VisionAnalyzer] Model restarted due to performance degradation")
+        
         # Preemptive cleanup to ensure clean state before each call
         if self.performance_stats['successful_calls'] > 0:  # Only cleanup after first success
             try:
@@ -324,8 +370,16 @@ Return ONLY the complete JSON object. No extra text before or after."""
         print(f"[VisionAnalyzer] Image size: {len(image_b64)} characters")
         
         try:
-            # Increased timeout for vision processing - local model needs more time
-            timeout = httpx.Timeout(connect=2.0, read=20.0, write=5.0, pool=20.0)
+            # Adaptive timeout based on model performance history
+            base_timeout = 20.0
+            if self.performance_stats['avg_response_time'] > 0:
+                # Use 3x average response time, but cap at 30s
+                adaptive_timeout = min(30.0, max(15.0, self.performance_stats['avg_response_time'] * 3))
+            else:
+                adaptive_timeout = base_timeout
+                
+            timeout = httpx.Timeout(connect=2.0, read=adaptive_timeout, write=5.0, pool=adaptive_timeout)
+            print(f"[VisionAnalyzer] Using adaptive timeout: {adaptive_timeout:.1f}s")
             limits  = httpx.Limits(max_keepalive_connections=0, max_connections=1)  # Force fresh connections
             
             async with httpx.AsyncClient(timeout=timeout, limits=limits, headers={"Connection": "close"}) as client:
