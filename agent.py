@@ -1,39 +1,41 @@
-import asyncio, os
+import asyncio
+import os
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv()  # Load API keys from .env file
 
-# Laminar tracing (uses LMNR_PROJECT_API_KEY from env if not passed)
+# Initialize Laminar tracing
 from lmnr import Laminar
 Laminar.initialize()
 
-from browser_use import Agent, BrowserSession
-from browser_use.llm import ChatGoogle
-from browser_use.browser import BrowserProfile
+from browser_use import Agent, ChatGoogle, BrowserProfile, BrowserSession
 
 async def main():
+    # Create a browser session with keep_alive configuration
     browser_session = BrowserSession(
         browser_profile=BrowserProfile(
-            user_data_dir=os.path.expanduser(r"C:/Users/drmcn/.config/browseruse/profiles/default"),
+            user_data_dir='C:/Users/drmcn/.config/browseruse/profiles/default',
             keep_alive=True,
-            headless=False,
+            headless=False  # Make sure this is False to see the browser
         )
     )
-
+    
+    # Create an agent with a specific task
     agent = Agent(
-        task="What's today's forecast high temperature for ZIP 40205?",
-        llm=ChatGoogle(model="gemini-2.5-flash"),  # or 'gemini-2.0-flash-exp'
+        task="what is today's high forecast temperature in 40205",
+        llm=ChatGoogle(
+            model="gemini-2.5-flash",
+            api_key=os.getenv('GOOGLE_API_KEY')
+        ),
         browser_session=browser_session,
-        use_vision=False,          # conditional vision can be added later
-        max_actions_per_step=8,    # good capability/cost balance
-        max_failures=3,            # optional: sturdier retries
-        retry_delay=10,            # optional: backoff on rate limits
-        save_conversation_path="logs/conversation",  # optional: debugging trace
+        use_vision=False,  # Explicitly disable vision for models that don't support it
     )
 
-    history = await agent.run(max_steps=60)
-    print("\nFinal result:\n", history.final_result())
+    
+    # Run the agent
+    await agent.run()
+    print("\n✅ Task completed! Browser will stay open.")
     input("Press Enter to close the browser...")
     await browser_session.kill()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())
