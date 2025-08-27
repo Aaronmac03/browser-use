@@ -52,7 +52,7 @@ NAVIGATION_TIMEOUT_MS = 60_000
 
 # Model ladder configuration
 O3_PLANNER_MODEL = "o3"
-LOCAL_EXECUTOR_MODEL = "moondream:latest"  # Local model via Ollama
+LOCAL_EXECUTOR_MODEL = "llava-phi3:latest"  # Local model via Ollama
 GEMINI_BACKUP_MODEL = "gemini-2.0-flash-exp"
 O3_ESCALATION_MODEL = "o3"
 
@@ -90,7 +90,7 @@ def save_query_log(query, result, cost_info=None):
         f.write(f"## Result\n{result}\n\n")
         if cost_info:
             f.write("## Cost Information\n")
-            f.write(f"- Local Vision Model: Moondream2 (Local)\n")
+            f.write(f"- Local Vision Model: Llava-Phi3 (Local)\n")
             f.write(f"- Cloud Planner Model: {cost_info.get('planner_model', 'N/A')}\n")
             f.write(f"- Executor Model: {cost_info.get('executor_model', 'N/A')}\n")
             f.write(f"- Prompt tokens: {cost_info.get('prompt_tokens', 'N/A')}\n")
@@ -167,8 +167,8 @@ class ExecutionContext(BaseModel):
 # Ollama Helper
 # ----------------------------
 
-async def resolve_moondream_tag(endpoint: str = "http://localhost:11434") -> str:
-    """Resolve Moondream2 tag by querying Ollama API."""
+async def resolve_llava_phi3_tag(endpoint: str = "http://localhost:11434") -> str:
+    """Resolve Llava-Phi3 tag by querying Ollama API."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{endpoint}/api/tags")
@@ -176,15 +176,15 @@ async def resolve_moondream_tag(endpoint: str = "http://localhost:11434") -> str
                 data = response.json()
                 for model in data.get('models', []):
                     model_name = model.get('name', '')
-                    if 'moondream' in model_name.lower():
+                    if 'llava-phi3' in model_name.lower():
                         return model_name
-                return "moondream:latest"
+                return "llava-phi3:latest"
             else:
-                return "moondream:latest"
+                return "llava-phi3:latest"
     except Exception as e:
         # Concise warning - don't fail loudly
         print(f"⚠️ Ollama API not available: {str(e)[:50]}")
-        return "moondream:latest"
+        return "llava-phi3:latest"
 
 # ----------------------------
 # Vision State Builder - REPLACED
@@ -266,82 +266,12 @@ class PlannerClient:
             plan_data = json.loads(response_text)
             plan = PlanJSON(**plan_data)
             
-            # Post-process: if no http in user_task and first two steps don't include search_web, insert search steps
-            plan = self._post_process_plan(plan, user_task)
-            
             print_status(f"Plan created: {len(plan.steps)} steps, complexity: {plan.estimated_complexity}", Colors.GREEN)
             return plan, usage_info
             
         except Exception as e:
             print_status(f"o3 planner failed, creating fallback plan: {e}", Colors.RED)
             return self._create_fallback_plan(user_task), {"model": self.model, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
-    
-    def _post_process_plan(self, plan: PlanJSON, user_task: str) -> PlanJSON:
-        """Post-process plan to insert search_web steps if needed."""
-        try:
-            # Check if user_task contains http/https URLs
-            if 'http' in user_task.lower():
-                return plan  # Don't modify plans with explicit URLs
-            
-            # Check if first two steps include search_web
-            first_two_steps = plan.steps[:2] if len(plan.steps) >= 2 else plan.steps
-            has_search_web = any(step.primitive == "search_web" for step in first_two_steps)
-            
-            if not has_search_web:
-                print_status("No search_web in first two steps, inserting search sequence", Colors.BLUE)
-                
-                # Create concise search query from user_task
-                search_query = self._create_search_query(user_task)
-                
-                # Create new steps to insert
-                search_steps = [
-                    GenericAction(
-                        primitive="search_web",
-                        target=None,
-                        value=search_query,
-                        notes="Search for relevant information"
-                    ),
-                    GenericAction(
-                        primitive="analyze_vision",
-                        target=None,
-                        value=None,
-                        notes="Analyze search results"
-                    ),
-                    GenericAction(
-                        primitive="click",
-                        target="first relevant result",
-                        value=None,
-                        notes="Navigate to most relevant result"
-                    )
-                ]
-                
-                # Insert at the beginning
-                plan.steps = search_steps + plan.steps
-                print_status(f"Inserted {len(search_steps)} search steps at beginning of plan", Colors.GREEN)
-            
-            return plan
-            
-        except Exception as e:
-            print_status(f"Plan post-processing failed: {e}", Colors.YELLOW)
-            return plan  # Return original plan on error
-    
-    def _create_search_query(self, user_task: str) -> str:
-        """Create a concise search query from user task."""
-        # Simple heuristics to create better search queries
-        task_lower = user_task.lower()
-        
-        # Extract key terms and create focused query
-        if 'price' in task_lower and ('kroger' in task_lower or 'milk' in task_lower):
-            return "kroger milk price"
-        elif 'availability' in task_lower:
-            # Extract store and product names
-            words = user_task.split()
-            return ' '.join(words[:4])  # Take first few words
-        else:
-            # Generic approach: take first 5-6 words, remove common stop words
-            stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'find', 'get', 'check'}
-            words = [w for w in user_task.split()[:6] if w.lower() not in stop_words]
-            return ' '.join(words[:4])  # Limit to 4 meaningful words
     
     def _build_planner_prompt(self, user_task: str) -> str:
         return f"""You are an expert web automation planner. Analyze the user's task and create a structured plan using ONLY generic primitives.
@@ -444,14 +374,6 @@ class LocalExecutor:
             # Execute the primitive action
             if action.primitive == "go_to_url":
                 result = await self._go_to_url(action.target)
-                
-                # After navigation, dismiss common banners/popups
-                if result.extracted_content and "successfully navigated" in result.extracted_content.lower():
-                    try:
-                        await self._dismiss_common_banners()
-                    except Exception as e:
-                        print_status(f"Banner dismissal failed: {e}", Colors.YELLOW)
-                
                 # Take screenshot after navigation
                 screenshot_event = self.browser_session.event_bus.dispatch(ScreenshotEvent(full_page=False))
                 screenshot_b64 = await screenshot_event.event_result(raise_if_any=True, raise_if_none=True)
@@ -587,40 +509,22 @@ class LocalExecutor:
             if not self.browser_session:
                 raise Exception("Browser session not initialized")
             
-            # Get current browser state (fixed method call)
-            state = await self.browser_session.get_browser_state_summary()
-            if not state.dom_state or not state.dom_state.selector_map:
-                raise Exception("No DOM state available")
+            # Get current DOM state
+            dom_state = await self.browser_session.get_dom_state()
             
             # Try to find matching element by text content or description
             target_element = None
-            for idx, element in state.dom_state.selector_map.items():
-                element_attrs = getattr(element, 'attributes', {}) or {}
-                element_text = element_attrs.get('text', '') or element_attrs.get('value', '') or getattr(element, 'node_value', '') or ''
-                
-                if element_text and (selector.lower() in element_text.lower() or element_text.lower() in selector.lower()):
+            for idx, element in enumerate(dom_state.clickable_elements, 1):
+                element_text = getattr(element, 'text', '') or getattr(element, 'value', '') or ''
+                if selector.lower() in element_text.lower() or element_text.lower() in selector.lower():
                     target_element = (idx, element)
-                    break
-                
-                # Also check other attributes that might contain relevant text
-                for attr_name in ['aria-label', 'title', 'alt']:
-                    attr_value = element_attrs.get(attr_name, '')
-                    if attr_value and (selector.lower() in attr_value.lower() or attr_value.lower() in selector.lower()):
-                        target_element = (idx, element)
-                        break
-                
-                if target_element:
                     break
             
             if not target_element:
-                # Try first clickable element as fallback (look for buttons, links, etc.)
-                for idx, element in state.dom_state.selector_map.items():
-                    element_tag = getattr(element, 'node_name', '').lower()
-                    if element_tag in ['button', 'a', 'input']:
-                        target_element = (idx, element)
-                        break
-                
-                if not target_element:
+                # Try first clickable element as fallback
+                if dom_state.clickable_elements:
+                    target_element = (1, dom_state.clickable_elements[0])
+                else:
                     raise Exception(f"No clickable elements found matching: {selector}")
             
             idx, element = target_element
@@ -637,111 +541,29 @@ class LocalExecutor:
         except Exception as e:
             return ActionResult(extracted_content=f"Click failed: {e}", include_in_memory=True)
     
-    async def _dismiss_common_banners(self) -> None:
-        """Dismiss common banners/popups after navigation."""
-        try:
-            if not self.browser_session:
-                return
-            
-            # Get current browser state
-            state = await self.browser_session.get_browser_state_summary()
-            if not state.dom_state or not state.dom_state.selector_map:
-                return
-            
-            # Common banner/popup button text patterns (case insensitive)
-            banner_patterns = [
-                r'accept', r'agree', r'got it', r'continue', r'close', r'^x$',
-                r'ok', r'dismiss', r'allow', r'enable', r'yes'
-            ]
-            
-            import re
-            
-            # Look for buttons/links with banner dismissal text
-            for idx, element in state.dom_state.selector_map.items():
-                element_attrs = getattr(element, 'attributes', {}) or {}
-                element_text = element_attrs.get('text', '') or element_attrs.get('value', '') or getattr(element, 'node_value', '') or ''
-                element_tag = getattr(element, 'node_name', '').lower()
-                
-                # Only check clickable elements
-                if element_tag in ['button', 'a', 'div'] and element_text:
-                    # Check if text matches any banner pattern
-                    for pattern in banner_patterns:
-                        if re.search(pattern, element_text.strip(), re.IGNORECASE):
-                            print_status(f"Dismissing banner: '{element_text.strip()}'", Colors.BLUE)
-                            try:
-                                # Click the banner dismissal button
-                                await self.controller.registry.execute_action(
-                                    action_name="click",
-                                    params={"index": idx, "while_holding_ctrl": False},
-                                    browser_session=self.browser_session,
-                                )
-                                await asyncio.sleep(0.5)  # Brief wait for banner to disappear
-                                return  # Only dismiss one banner per call
-                            except Exception as click_error:
-                                print_status(f"Failed to click banner button: {click_error}", Colors.YELLOW)
-                                continue
-                            
-        except Exception as e:
-            print_status(f"Banner dismissal error: {e}", Colors.YELLOW)
-    
-
-
-
     async def _type(self, selector: str, text: str) -> ActionResult:
-        """Type text into element with browser-use DOM search and fallback strategies."""
+        """Type text into element."""
         try:
             if not self.browser_session:
                 raise Exception("Browser session not initialized")
             
-            # Get current browser state
-            state = await self.browser_session.get_browser_state_summary()
-            if not state.dom_state or not state.dom_state.selector_map:
-                # Fallback: try "/" shortcut for search
-                print_status("No DOM state, trying '/' shortcut for search", Colors.YELLOW)
-                return await self._try_slash_search_shortcut(text)
+            # Get current DOM state
+            dom_state = await self.browser_session.get_dom_state()
             
-            # First, try browser-use DOM search for search-related typing
-            if 'search' in selector.lower():
-                search_element = await self._find_search_input_dom()
-                if search_element:
-                    idx, element = search_element
-                    print_status(f"Found search input via DOM: {idx}", Colors.GREEN)
-                    await self.controller.registry.execute_action(
-                        action_name="input_text",
-                        params={"index": idx, "text": text, "clear_existing": True},
-                        browser_session=self.browser_session,
-                    )
-                    await asyncio.sleep(0.3)
-                    return ActionResult(extracted_content=f"Successfully typed '{text}' into search element {idx}", include_in_memory=True)
-            
-            # Try to find matching input element from selector map
+            # Try to find matching input element
             target_element = None
-            for idx, element in state.dom_state.selector_map.items():
-                element_attrs = getattr(element, 'attributes', {}) or {}
-                element_tag = getattr(element, 'node_name', '').lower()
-                
-                if element_tag == 'input':
-                    # Check various attributes for matching
-                    for attr_name in ['placeholder', 'aria-label', 'name', 'id', 'class']:
-                        attr_value = element_attrs.get(attr_name, '')
-                        if attr_value and (selector.lower() in attr_value.lower() or attr_value.lower() in selector.lower()):
-                            target_element = (idx, element)
-                            break
-                    if target_element:
-                        break
+            for idx, element in enumerate(dom_state.input_fields, 1):
+                element_text = getattr(element, 'placeholder', '') or getattr(element, 'label', '') or ''
+                if selector.lower() in element_text.lower() or element_text.lower() in selector.lower():
+                    target_element = (idx, element)
+                    break
             
             if not target_element:
-                # Try first input element as fallback
-                for idx, element in state.dom_state.selector_map.items():
-                    element_tag = getattr(element, 'node_name', '').lower()
-                    if element_tag == 'input':
-                        target_element = (idx, element)
-                        break
-                
-                if not target_element:
-                    # Final fallback: try "/" shortcut or type into active element
-                    print_status("No input fields found, trying fallback strategies", Colors.YELLOW)
-                    return await self._try_slash_search_shortcut(text)
+                # Try first input field as fallback
+                if dom_state.input_fields:
+                    target_element = (1, dom_state.input_fields[0])
+                else:
+                    raise Exception(f"No input fields found matching: {selector}")
             
             idx, element = target_element
             
@@ -756,67 +578,6 @@ class LocalExecutor:
             return ActionResult(extracted_content=f"Successfully typed '{text}' into element {idx}: {selector}", include_in_memory=True)
         except Exception as e:
             return ActionResult(extracted_content=f"Type failed: {e}", include_in_memory=True)
-    
-    async def _find_search_input_dom(self) -> Optional[tuple[int, Any]]:
-        """Find search input using browser-use DOM state."""
-        try:
-            state = await self.browser_session.get_browser_state_summary()
-            if not state.dom_state or not state.dom_state.selector_map:
-                return None
-            
-            # Check selector map for search inputs
-            for idx, element in state.dom_state.selector_map.items():
-                element_attrs = getattr(element, 'attributes', {}) or {}
-                element_tag = getattr(element, 'node_name', '').lower()
-                
-                if element_tag == 'input':
-                    # Check input type
-                    input_type = element_attrs.get('type', '').lower()
-                    if input_type == 'search':
-                        return (idx, element)
-                    
-                    # Check other search indicators
-                    for attr_name in ['aria-label', 'placeholder', 'name', 'id', 'class']:
-                        attr_value = element_attrs.get(attr_name, '').lower()
-                        if 'search' in attr_value:
-                            return (idx, element)
-            
-            return None
-        except Exception:
-            return None
-    
-    async def _try_slash_search_shortcut(self, text: str) -> ActionResult:
-        """Try using '/' shortcut for search or type into active element."""
-        try:
-            # Try "/" shortcut first (common on many sites)
-            await self.controller.registry.execute_action(
-                action_name="key",
-                params={"key": "/"},
-                browser_session=self.browser_session,
-            )
-            await asyncio.sleep(0.2)
-            
-            # Type the search text
-            await self.controller.registry.execute_action(
-                action_name="key",
-                params={"key": text},
-                browser_session=self.browser_session,
-            )
-            await asyncio.sleep(0.3)
-            
-            return ActionResult(extracted_content=f"Used '/' shortcut to type: {text}", include_in_memory=True)
-            
-        except Exception as e:
-            # Final fallback: just type the text (will go to active element)
-            try:
-                await self.controller.registry.execute_action(
-                    action_name="key",
-                    params={"key": text},
-                    browser_session=self.browser_session,
-                )
-                return ActionResult(extracted_content=f"Typed into active element: {text}", include_in_memory=True)
-            except Exception as final_error:
-                return ActionResult(extracted_content=f"All type strategies failed: {final_error}", include_in_memory=True)
     
     async def _scroll(self, direction: str = "down") -> ActionResult:
         """Scroll page."""
@@ -889,8 +650,7 @@ class LocalExecutor:
                 )
 
             try:
-                # Very aggressive timeout for local processing
-                vision_state = await asyncio.wait_for(call_vision(), timeout=45)
+                vision_state = await asyncio.wait_for(call_vision(), timeout=300)
                 # Reset timeout counter on success
                 self.vision_timeout_count = 0
             except asyncio.TimeoutError:
@@ -1013,8 +773,6 @@ class EscalationManager:
             "debug_console": "wait",
             "analyze_code": "analyze_vision",
             "comment": "wait",
-            "pause": "wait",
-            "text_search": "search_web",
         }
         return mapping.get(n, n)
 
@@ -1575,7 +1333,7 @@ class HybridAgent:
             "o3": {"input": 15.0, "output": 60.0},  # $15/$60 per 1M tokens
             "o3-mini": {"input": 3.0, "output": 12.0},  # $3/$12 per 1M tokens  
             "gemini-2.0-flash-exp": {"input": 0.075, "output": 0.30},  # $0.075/$0.30 per 1M tokens
-            "moondream:latest": {"input": 0.0, "output": 0.0},  # Local model - no cost
+            "llava-phi3:latest": {"input": 0.0, "output": 0.0},  # Local model - no cost
         }
         
         cost_breakdown = {
@@ -1712,7 +1470,7 @@ class HybridAgent:
         
         # Warm-start MiniCPM-V once with a 1x1 ping image to keep model hot
         try:
-            print_status("Warming up local VLM (Moondream2) with a tiny ping...", Colors.BLUE)
+            print_status("Warming up local VLM (Llava-Phi3) with a tiny ping...", Colors.BLUE)
             import base64
             # 1x1 white pixel PNG
             tiny_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
@@ -1720,8 +1478,8 @@ class HybridAgent:
             prompt = self.vision_analyzer.build_vision_prompt()
             # Ensure exact model tag is resolved before first real call
             if not self.vision_analyzer.model_name:
-                self.vision_analyzer.model_name = await self.vision_analyzer.resolve_moondream_tag()
-            await self.vision_analyzer.call_moondream(prompt, tiny_png_b64)
+                self.vision_analyzer.model_name = await self.vision_analyzer.resolve_llava_phi3_tag()
+            await self.vision_analyzer.call_llava_phi3(prompt, tiny_png_b64)
             print_status("Local VLM warm-up complete", Colors.GREEN)
         except Exception as warm_err:
             print_status(f"VLM warm-up failed: {warm_err}", Colors.RED)
@@ -1753,7 +1511,7 @@ async def main():
         print("Please ensure Ollama is installed and running:")
         print("   1. Install: https://ollama.ai")
         print("   2. Start: ollama serve")  
-        print("   3. Install model: ollama pull moondream")
+        print("   3. Install model: ollama pull llava-phi3:latest")
         print("   4. Or run: python ollama_manager.py --setup")
         print("\nExiting - vision model is required for hybrid agent functionality.")
         return
@@ -1762,11 +1520,11 @@ async def main():
     
     # Test model availability
     try:
-        model_name = await agent.vision_analyzer.resolve_moondream_tag()
+        model_name = await agent.vision_analyzer.resolve_llava_phi3_tag()
         print(f"Using model: {model_name}")
     except Exception as e:
         print(f"Warning: Could not resolve model tag: {e}")
-        print("Will attempt to use moondream:latest")
+        print("Will attempt to use llava-phi3:latest")
     print("")
     
     while True:

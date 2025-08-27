@@ -11,11 +11,10 @@
 - **Browser Integration**: Full browser-use session management and controller integration
 - **Error Handling**: Robust exception handling with multiple fallback strategies per action type
 - **CLI Interface**: Complete command-line interface with task execution loop
-- **Local VLM wired via Ollama (Moondream2)**: VisionStateBuilder returns caption/elements/fields/affordances; both tests passing
+- **Local VLM wired via Ollama (Llava-Phi3)**: VisionStateBuilder returns caption/elements/fields/affordances; both tests passing
 
-### ✅ **COMPLETED** 
+### 🔄 **IN PROGRESS**
 - **Testing**: Basic functionality confirmed, but full end-to-end workflow testing needed
-- **Local Vision Setup**: Complete integration with Moondream2 via Ollama with all critical issues resolved
 
 ### ❌ **REMAINING**
 - **selector_hint quality**: Improve CSS/XPath selector generation from vision analysis
@@ -23,66 +22,12 @@
 - **Visual diff optimization**: Change detection between screenshots   
 - **Acceptance fixtures**: Login, search, comparison, ambiguity, failure recovery scenarios
 
----
-
-## 📊 **LOCAL VISION SYSTEM STATUS - COMPLETE ✅**
-
-### **Performance Metrics**
-- **Response Time**: 8-10 seconds per vision analysis
-- **Success Rate**: 100% with robust fallback handling  
-- **Model**: Moondream:latest (local, CPU-based)
-- **Image Processing**: 256px max dimension, 40% JPEG quality for speed
-- **Timeout**: 60 seconds (conservative for reliability)
-
-### **Issues Resolved**
-
-#### 1. Ollama Service Issues ✅
-- **Problem**: Model stuck in overloaded state causing timeouts
-- **Solution**: Completely restarted Ollama service, cleared stuck processes
-- **Result**: Model now responds consistently in ~8 seconds
-
-#### 2. JSON Format Constraint ✅  
-- **Problem**: Using `"format": "json"` parameter caused 60+ second timeouts
-- **Solution**: Removed format constraint, used prompt-based JSON instruction instead
-- **Result**: Dramatically improved response times (60s → 8s)
-
-#### 3. Malformed JSON Responses ✅
-- **Problem**: Model returned arrays instead of objects, multiple JSON objects in response
-- **Solution**: Implemented robust JSON extraction with brace/bracket counting algorithm
-- **Result**: Successfully parses first valid JSON structure from any response format
-
-#### 4. Data Type Validation Errors ✅
-- **Problem**: Float coordinates and array attributes caused Pydantic validation failures
-- **Solution**: Added automatic data conversion (floats→integers, arrays→dictionaries)
-- **Result**: Clean VisionElement objects created successfully every time
-
-#### 5. Missing VisionMeta Fields ✅
-- **Problem**: VisionMeta schema missing model_name, confidence, processing_time fields
-- **Solution**: Extended VisionMeta schema and updated object creation logic
-- **Result**: Complete metadata tracking for all vision operations
-
-### **Key Optimizations Applied**
-1. **Aggressive image downsizing**: 256px max dimension vs 1024px original
-2. **Reduced token generation**: Limited to 300 tokens vs unlimited
-3. **Simplified prompts**: Focus on essential JSON structure only
-4. **Robust parsing**: Handle multiple JSON response formats gracefully
-5. **Conservative timeouts**: Favor reliability over pure speed
-
-### **Integration Status**
-- ✅ **VisionAnalyzer**: Working independently with all error handling
-- ✅ **HybridAgent**: Vision integration functional and tested  
-- ✅ **Screenshot Pipeline**: Complete capture and analysis workflow
-- ✅ **Fallback Handling**: Graceful error recovery in all failure modes
-- ✅ **Local-First**: Zero cloud dependencies maintained as specified
-
-The local vision setup is now **production-ready** for the hybrid agent with reliable 8-10 second response times and comprehensive error handling.
-
 ## 🚀 **NEXT IMMEDIATE STEPS**
 
-1. ~~**Complete VisionStateBuilder**: Replace placeholder with actual Moondream2 integration~~ ✅ **COMPLETE**
-   - ~~Set up local Ollama server with Moondream2 model~~ ✅ **COMPLETE**
-   - ~~Implement HTTP client to call local VLM and parse structured output~~ ✅ **COMPLETE**
-   - ~~Add screenshot preprocessing and vision prompt engineering~~ ✅ **COMPLETE**
+1. **Complete VisionStateBuilder**: Replace placeholder with actual Llava-Phi3 integration
+   - Set up local Ollama server with Llava-Phi3 model
+   - Implement HTTP client to call local VLM and parse structured output
+   - Add screenshot preprocessing and vision prompt engineering
 
 2. **End-to-End Testing**: Test full hybrid_agent.py workflow
    - Simple tasks (click, type, navigate) via local execution
@@ -110,14 +55,14 @@ The user experience flow
 Replace the browser automation logic with the hybrid system. The ultimate goal is a new script called hybrid_agent.py that the user will run instead of agent.py. 
 
 Models
-* Local VLM (always on): Moondream2 (single download). Provide a thin client that can call a local server (e.g., HTTP endpoint) and return compact JSON. The runtime may be GPU or CPU; prefer int4/gguf quantization if needed. OllamaGitHub
+* Local VLM (always on): Llava-Phi3 (single download). Provide a thin client that can call a local server (e.g., HTTP endpoint) and return compact JSON. The runtime may be GPU or CPU; prefer int4/gguf quantization if needed. OllamaGitHub
 * Cloud Reasoner (rare calls): Gemini 2.0 Flash (model id per vendor docs) via google api key. Must support structured outputs / function calling and 1M-token context. Google AI for Developers
 Objectives
 1. Local Vision Loop (every action): Take a screenshot → summarize UI into structured JSON (“VisionState”) + a short caption.
 2. Local Simple Actions: If the next step is obvious (click, type, scroll, navigate) and target is unambiguous, execute locally without cloud.
 3. Cloud Reasoning (escalate sparingly): When the step is ambiguous or multi-hop (checkout, comparison, recovery from failure), send task + recent history + latest VisionState to Gemini 2.0 Flash; get back a small, ordered action plan. Google AI for Developers
 New Components (add to your codebase)
-* VisionStateBuilder (local): Given a screenshot, call Moondream2 and return:
+* VisionStateBuilder (local): Given a screenshot, call Llava-Phi3 and return:
     * caption (≤200 chars)
     * elements[] with {role, visible_text, attributes, selector_hint, bbox, confidence}
     * fields[] with {name_hint, value_hint, bbox, editable}
@@ -128,7 +73,7 @@ New Components (add to your codebase)
 * HandoffManager: Route between local and cloud; maintain rolling History (last N steps with compact diffs).
 * Confidence & Backoff: If VisionState confidence < threshold or two consecutive local failures, escalate to cloud.
 Data Contracts (schemas to enforce)
-* VisionState (from Moondream2):
+* VisionState (from Llava-Phi3):
 
 
 
@@ -190,7 +135,7 @@ Handoff Rules (enforce)
 * Cloud handles: multi-page flows (checkout/login recovery), price/feature comparisons, disambiguation when multiple similar targets exist, any nontrivial planning.
 * Never send images to cloud by default. Send only VisionState JSON; allow an override flag to include a one-off image if cloud explicitly requests it.
 Configuration
-* Local model: set default local VLM to Moondream2. Provide a single place to swap the model tag/path if needed. (Reference: Moondream2 available via Ollama; supports llama.cpp/GGUF.) OllamaGitHub
+* Local model: set default local VLM to Llava-Phi3. Provide a single place to swap the model tag/path if needed. (Reference: Llava-Phi3 available via Ollama; supports llama.cpp/GGUF.) OllamaGitHub
 * Cloud model: set default to Gemini 2.0 Flash model id available in your SDK (see Google’s model list). Include a config knob to switch to 2.5 Flash/Flash-Lite if quota/rate limits require it. Google AI for Developers
 * Rate limiting: implement per-minute cap on cloud calls; prefer batching decisions into short plan lists.
 * Logging/Telemetry: store every VisionState (hashed), every action, and planner responses; redact PII in logs.
@@ -218,7 +163,7 @@ python
 
 
 python
-# Moondream2 can be slow on CPU
+# Llava-Phi3 can be slow on CPU
 class VisionStateCache:
     def get_or_compute(screenshot_hash, viewport_dims):
         # Cache identical screenshots (common in loading states)

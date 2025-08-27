@@ -14,7 +14,7 @@ async def main():
 	print("=" * 40)
 	
 	# Initialize manager with required model
-	manager = OllamaManager(model="moondream:latest")
+	manager = OllamaManager(model="llava-phi3:latest")
 	
 	print("🔍 Checking current status...")
 	health = await manager.health_check()
@@ -52,7 +52,7 @@ async def main():
 		print("📋 Please check the error messages above and try manual installation:")
 		print("   1. Install Ollama: https://ollama.ai")
 		print("   2. Start service: ollama serve")
-		print("   3. Pull model: ollama pull moondream")
+		print("   3. Pull model: ollama pull llava-phi3:latest")
 		sys.exit(1)
 
 if __name__ == "__main__":
