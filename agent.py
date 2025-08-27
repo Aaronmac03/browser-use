@@ -35,13 +35,10 @@ load_dotenv(override=True)
 
 from browser_use import Agent, BrowserProfile, BrowserSession, Controller
 from browser_use.agent.views import AgentHistoryList
-from browser_use.llm import ChatOpenAI, ChatAnthropic, ChatGoogle, SystemMessage, UserMessage  # NOTE: imports from browser_use.llm
+from browser_use.llm import ChatOpenAI, ChatGoogle, SystemMessage, UserMessage  # NOTE: imports from browser_use.llm
 
 # Import Serper search integration
 from serper_search import search_with_serper_fallback
-
-# Import Aug23 optimizations
-from aug23_hooks import RobustnessManager, HumanGatekeeper, enhanced_agent_run
 
 # ----------------------------
 # Structured Output Schemas
@@ -158,10 +155,9 @@ CHROME_PROFILE_DIR = 'C:/Users/drmcn/.config/browseruse/profiles/default'
 LOGS_DIR = Path('browser_queries')
 LOGS_DIR.mkdir(exist_ok=True)
 
-# Aug23 Playbook Model Strategy
-PLANNER_MODEL  = "gpt-4o-mini"               # Cheaper reasoning model  
-EXECUTOR_MODEL = "o3"                        # Strong executor model
-STRONG_MODEL   = "claude-3-5-sonnet-20241022"  # Escalation model for failures
+# Force specific models (ignore env vars to avoid invalid model issues)
+PLANNER_MODEL  = "openai/gpt-oss-120b"  # OpenRouter - GPT OSS 120B
+EXECUTOR_MODEL = "gemini-2.5-flash"      # Google - forced default
 
 # ----------------------------
 # Terminal colors
@@ -176,9 +172,8 @@ class Colors:
 
 def print_header():
     print(f"\n{Colors.BOLD}{'='*70}{Colors.END}")
-    print(f"{Colors.BLUE}{Colors.BOLD}🤖 Browser-Use Query Tool - Aug23 Optimized{Colors.END}")
-    print(f"{Colors.GREEN}📊 Structured Outputs + Robustness Hooks + Model Escalation{Colors.END}")
-    print(f"{Colors.YELLOW}🚀 Planner: gpt-4o-mini → Executor: o3 → Escalation: claude-3-5-sonnet{Colors.END}")
+    print(f"{Colors.BLUE}{Colors.BOLD}🤖 Browser-Use Query Tool with Structured Outputs{Colors.END}")
+    print(f"{Colors.GREEN}📊 Enforces JSON schemas for plans, critiques & data extraction{Colors.END}")
     print(f"{Colors.BOLD}{'='*70}{Colors.END}\n")
 
 def print_status(message, color=Colors.BLUE):
@@ -1036,24 +1031,21 @@ You MUST output valid JSON following the ProgressAssessment schema."""
 async def run_query(query: str, keep_browser_open: bool = True) -> bool:
     print_status("Initializing milestone-based planner/critic system...", Colors.YELLOW)
 
-    # Browser session with aug23 stability optimizations
+    # Browser session
     browser_profile = BrowserProfile(
         user_data_dir=CHROME_PROFILE_DIR,
         keep_alive=keep_browser_open,
-        headless=False,
-        # Aug23 stability-first timing
-        wait_for_network_idle_page_load_time=3.0,
-        minimum_wait_page_load_time=0.5,
-        maximum_wait_page_load_time=8.0,
-        wait_between_actions=0.7,
-        default_timeout=10_000,
-        default_navigation_timeout=45_000,
+        headless=False
     )
     browser_session = BrowserSession(browser_profile=browser_profile)
 
-    # Aug23 Playbook LLM Strategy
-    planner_llm = ChatOpenAI(model=PLANNER_MODEL)   # gpt-4o-mini for cheap reasoning
-    executor_llm = ChatOpenAI(model=EXECUTOR_MODEL) # o3 for strong execution
+    # LLMs
+    planner_llm = ChatOpenAI(
+        model=PLANNER_MODEL, 
+        base_url='https://openrouter.ai/api/v1',
+        api_key=os.getenv('OPENROUTER_API_KEY')
+    )
+    executor_llm = ChatGoogle(model=EXECUTOR_MODEL, api_key=os.getenv('GOOGLE_API_KEY'))
 
     print_status(f"Planner/Critic: {PLANNER_MODEL} (frequent re-assessment)", Colors.BLUE)
     print_status(f"Executor: {EXECUTOR_MODEL} (milestone chunks)", Colors.BLUE)
@@ -1144,21 +1136,13 @@ async def run_query(query: str, keep_browser_open: bool = True) -> bool:
         print_status(f"🎯 MILESTONE {milestone_count}/{MAX_MILESTONES} - Executing {CHUNK_SIZE} steps...", Colors.BOLD + Colors.BLUE)
         print_status(f"{'='*60}\n", Colors.BLUE)
         
-        # Create agent for this milestone chunk with aug23 playbook parameters
+        # Create agent for this milestone chunk
         agent = Agent(
             task=current_plan,
             llm=executor_llm,
-            planner_llm=planner_llm,  # Enable planner/executor strategy
             browser_session=browser_session,
             output_model_schema=output_schema,
             max_steps=CHUNK_SIZE,
-            # Aug23 Playbook Parameters
-            max_actions_per_step=2,   # Controlled steps for reliability
-            max_failures=3,           # Robust failure handling
-            retry_delay=10,           # Patient retries
-            use_vision=True,          # Enable vision for better understanding
-            vision_detail_level="auto",  # Dynamic cost management
-            save_conversation_path=str(LOGS_DIR / "conversations"),  # Observability
             extend_system_message="CRITICAL: Focus on immediate next steps. When extracting data, use structured output format. Prefer in-app viewers; avoid downloads; keep to the user's stated intent.\n\nCUSTOM ACTIONS AVAILABLE:\n\n1. 'search_web' - Fast & cheap web search via Serper API with browser fallback:\n   - Much cheaper than browser searches ($2 per 1000 vs $0.25 per search)\n   - Faster and more reliable than navigating to Google\n   - Automatically falls back to browser search if API fails\n   - Returns formatted results with titles, URLs, snippets\n   - Call with: search_web(query='your search terms', num_results=10)\n   - Use this instead of navigating to Google for research tasks\n\n2. 'fallback_extract_table' - Complete Tabular → Text → JSON pipeline:\n   - Extract: Try File→Download CSV (Google Sheets) → Select All→Copy clipboard → HTML table parsing\n   - Structure: Use LLM to map raw data to target schema (EventsSchema by default)\n   - Return: Structured JSON ready for use\n   - Call with: fallback_extract_table(want_fields=['date', 'time', 'event'], target_schema='EventsSchema')\n   - Works universally on any table/schedule across any site/app when normal extraction struggles"
         )
         
@@ -1168,30 +1152,8 @@ async def run_query(query: str, keep_browser_open: bool = True) -> bool:
             await register_serper_search_action(agent.controller)
         
         try:
-            # Execute milestone chunk with Aug23 robustness hooks  
-            robustness = RobustnessManager(strong_model_name=STRONG_MODEL)
-            gatekeeper = HumanGatekeeper()
-            
-            # Human safety gate check before execution
-            if gatekeeper.requires_confirmation(current_plan):
-                print_status(f"🚨 Dangerous operation detected in milestone {milestone_count}", Colors.YELLOW)
-                if not gatekeeper.get_confirmation(f"Execute: {current_plan[:100]}...?"):
-                    print_status("❌ User cancelled dangerous operation", Colors.RED)
-                    break
-            
-            # Pre-execution hook
-            await robustness.on_step_start(agent, {"step_number": milestone_count, "action_type": "milestone_execution"})
-            
-            # Execute milestone chunk (keeping your original logic)
+            # Execute milestone chunk
             chunk_history: AgentHistoryList = await agent.run()
-            
-            # Post-execution hook for failure handling and model escalation
-            step_success = len(chunk_history) > 0 and all(
-                not hasattr(event, 'error') or not event.error 
-                for event in chunk_history
-            )
-            await robustness.on_step_end(agent, {"success": step_success})
-            
             all_histories.append(chunk_history)
             
             # Assess progress with planner/critic
@@ -1453,14 +1415,14 @@ Generate a revised plan that addresses current obstacles and focuses on the next
 async def main():
     print_header()
 
-    # Require keys for aug23 model strategy
+    # Require keys
     missing = []
-    if not os.getenv('OPENAI_API_KEY'):
-        missing.append('OPENAI_API_KEY (planner: gpt-4o-mini, executor: o3)')
-    if not os.getenv('ANTHROPIC_API_KEY'):
-        missing.append('ANTHROPIC_API_KEY (escalation: claude-3-5-sonnet)')
+    if not os.getenv('OPENROUTER_API_KEY'):
+        missing.append('OPENROUTER_API_KEY (planner/critic)')
+    if not os.getenv('GOOGLE_API_KEY'):
+        missing.append('GOOGLE_API_KEY (executor)')
     if missing:
-        print_status("❌ Missing required API keys for aug23 model strategy:", Colors.RED)
+        print_status("❌ Missing required API keys:", Colors.RED)
         for k in missing:
             print_status(f"  - {k}", Colors.YELLOW)
         print_status("Add them to your .env and rerun.", Colors.YELLOW)
