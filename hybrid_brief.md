@@ -11,7 +11,7 @@
 - **Browser Integration**: Full browser-use session management and controller integration
 - **Error Handling**: Robust exception handling with multiple fallback strategies per action type
 - **CLI Interface**: Complete command-line interface with task execution loop
-- **Local VLM wired via Ollama (Llava-Phi3)**: VisionStateBuilder returns caption/elements/fields/affordances; both tests passing
+- **Local VLM wired via Ollama (MiniCPM-V)**: VisionStateBuilder returns caption/elements/fields/affordances; both tests passing
 
 ### 🔄 **IN PROGRESS**
 - **Testing**: Basic functionality confirmed, but full end-to-end workflow testing needed
@@ -24,8 +24,8 @@
 
 ## 🚀 **NEXT IMMEDIATE STEPS**
 
-1. **Complete VisionStateBuilder**: Replace placeholder with actual Llava-Phi3 integration
-   - Set up local Ollama server with Llava-Phi3 model
+1. **Complete VisionStateBuilder**: Replace placeholder with actual MiniCPM-V 2.6 integration
+   - Set up local Ollama server with MiniCPM-V 2.6 model
    - Implement HTTP client to call local VLM and parse structured output
    - Add screenshot preprocessing and vision prompt engineering
 
@@ -55,14 +55,14 @@ The user experience flow
 Replace the browser automation logic with the hybrid system. The ultimate goal is a new script called hybrid_agent.py that the user will run instead of agent.py. 
 
 Models
-* Local VLM (always on): Llava-Phi3 (single download). Provide a thin client that can call a local server (e.g., HTTP endpoint) and return compact JSON. The runtime may be GPU or CPU; prefer int4/gguf quantization if needed. OllamaGitHub
+* Local VLM (always on): MiniCPM-V 2.6 (single download). Provide a thin client that can call a local server (e.g., HTTP endpoint) and return compact JSON. The runtime may be GPU or CPU; prefer int4/gguf quantization if needed. OllamaGitHub
 * Cloud Reasoner (rare calls): Gemini 2.0 Flash (model id per vendor docs) via google api key. Must support structured outputs / function calling and 1M-token context. Google AI for Developers
 Objectives
 1. Local Vision Loop (every action): Take a screenshot → summarize UI into structured JSON (“VisionState”) + a short caption.
 2. Local Simple Actions: If the next step is obvious (click, type, scroll, navigate) and target is unambiguous, execute locally without cloud.
 3. Cloud Reasoning (escalate sparingly): When the step is ambiguous or multi-hop (checkout, comparison, recovery from failure), send task + recent history + latest VisionState to Gemini 2.0 Flash; get back a small, ordered action plan. Google AI for Developers
 New Components (add to your codebase)
-* VisionStateBuilder (local): Given a screenshot, call Llava-Phi3 and return:
+* VisionStateBuilder (local): Given a screenshot, call MiniCPM-V 2.6 and return:
     * caption (≤200 chars)
     * elements[] with {role, visible_text, attributes, selector_hint, bbox, confidence}
     * fields[] with {name_hint, value_hint, bbox, editable}
@@ -73,7 +73,7 @@ New Components (add to your codebase)
 * HandoffManager: Route between local and cloud; maintain rolling History (last N steps with compact diffs).
 * Confidence & Backoff: If VisionState confidence < threshold or two consecutive local failures, escalate to cloud.
 Data Contracts (schemas to enforce)
-* VisionState (from Llava-Phi3):
+* VisionState (from MiniCPM-V 2.6):
 
 
 
@@ -135,7 +135,7 @@ Handoff Rules (enforce)
 * Cloud handles: multi-page flows (checkout/login recovery), price/feature comparisons, disambiguation when multiple similar targets exist, any nontrivial planning.
 * Never send images to cloud by default. Send only VisionState JSON; allow an override flag to include a one-off image if cloud explicitly requests it.
 Configuration
-* Local model: set default local VLM to Llava-Phi3. Provide a single place to swap the model tag/path if needed. (Reference: Llava-Phi3 available via Ollama; supports llama.cpp/GGUF.) OllamaGitHub
+* Local model: set default local VLM to MiniCPM-V 2.6. Provide a single place to swap the model tag/path if needed. (Reference: MiniCPM-V 2.6 available via Ollama; supports llama.cpp/GGUF.) OllamaGitHub
 * Cloud model: set default to Gemini 2.0 Flash model id available in your SDK (see Google’s model list). Include a config knob to switch to 2.5 Flash/Flash-Lite if quota/rate limits require it. Google AI for Developers
 * Rate limiting: implement per-minute cap on cloud calls; prefer batching decisions into short plan lists.
 * Logging/Telemetry: store every VisionState (hashed), every action, and planner responses; redact PII in logs.
@@ -163,7 +163,7 @@ python
 
 
 python
-# Llava-Phi3 can be slow on CPU
+# MiniCPM-V can be slow on CPU
 class VisionStateCache:
     def get_or_compute(screenshot_hash, viewport_dims):
         # Cache identical screenshots (common in loading states)

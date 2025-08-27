@@ -31,8 +31,6 @@ from browser_use import Agent, Controller, ActionResult
 from browser_use.browser import BrowserProfile, BrowserSession
 from browser_use.browser.events import ScreenshotEvent
 from browser_use.llm import ChatGoogle, ChatOpenAI
-from browser_use.llm.messages import UserMessage
-import openai
 
 # Import serper search functionality
 from serper_search import search_with_serper_fallback
@@ -52,7 +50,7 @@ NAVIGATION_TIMEOUT_MS = 60_000
 
 # Model ladder configuration
 O3_PLANNER_MODEL = "o3"
-LOCAL_EXECUTOR_MODEL = "llava-phi3:latest"  # Local model via Ollama
+LOCAL_EXECUTOR_MODEL = "minicpm-v"  # Local model via Ollama
 GEMINI_BACKUP_MODEL = "gemini-2.0-flash-exp"
 O3_ESCALATION_MODEL = "o3"
 
@@ -90,7 +88,7 @@ def save_query_log(query, result, cost_info=None):
         f.write(f"## Result\n{result}\n\n")
         if cost_info:
             f.write("## Cost Information\n")
-            f.write(f"- Local Vision Model: Llava-Phi3 (Local)\n")
+            f.write(f"- Local Vision Model: MiniCPM-V 2.6 (Local)\n")
             f.write(f"- Cloud Planner Model: {cost_info.get('planner_model', 'N/A')}\n")
             f.write(f"- Executor Model: {cost_info.get('executor_model', 'N/A')}\n")
             f.write(f"- Prompt tokens: {cost_info.get('prompt_tokens', 'N/A')}\n")
@@ -167,8 +165,8 @@ class ExecutionContext(BaseModel):
 # Ollama Helper
 # ----------------------------
 
-async def resolve_llava_phi3_tag(endpoint: str = "http://localhost:11434") -> str:
-    """Resolve Llava-Phi3 tag by querying Ollama API."""
+async def resolve_minicpm_tag(endpoint: str = "http://localhost:11434") -> str:
+    """Resolve MiniCPM-V tag by querying Ollama API."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{endpoint}/api/tags")
@@ -176,15 +174,15 @@ async def resolve_llava_phi3_tag(endpoint: str = "http://localhost:11434") -> st
                 data = response.json()
                 for model in data.get('models', []):
                     model_name = model.get('name', '')
-                    if 'llava-phi3' in model_name.lower():
-                        return model_name
-                return "llava-phi3:latest"
+                    if 'minicpm-v' in model_name.lower():
+                        return model_name.replace(':latest', '')
+                return "minicpm-v"
             else:
-                return "llava-phi3:latest"
+                return "minicpm-v"
     except Exception as e:
         # Concise warning - don't fail loudly
         print(f"⚠️ Ollama API not available: {str(e)[:50]}")
-        return "llava-phi3:latest"
+        return "minicpm-v"
 
 # ----------------------------
 # Vision State Builder - REPLACED
@@ -222,9 +220,7 @@ class PlannerClient:
     """OpenAI o3 planner that runs exactly once per user query."""
     
     def __init__(self):
-        # Use native OpenAI client instead of browser-use ChatOpenAI to avoid message format issues
-        self.client = openai.AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-        self.model = O3_PLANNER_MODEL
+        self.llm = ChatOpenAI(model=O3_PLANNER_MODEL)
     
     async def create_plan(self, user_task: str) -> tuple[PlanJSON, Dict[str, Any]]:
         """Create structured plan from user task (runs exactly once). Returns plan and usage info."""
@@ -232,26 +228,16 @@ class PlannerClient:
             prompt = self._build_planner_prompt(user_task)
             
             print_status("Running o3 planner (one-shot)...", Colors.BLUE)
-            
-            # Use a working model instead of o3 for now (o3 may not be available yet)
-            available_model = "gpt-4" if self.model == "o3" else self.model
-            
-            response = await self.client.chat.completions.create(
-                model=available_model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2000,
-                temperature=0.1
-            )
-            
-            response_text = response.choices[0].message.content.strip()
+            response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
+            response_text = response.completion.strip()
             
             # Capture actual usage information
             usage_info = {
-                "model": available_model,
+                "model": self.llm.model,
                 "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
                 "completion_tokens": response.usage.completion_tokens if response.usage else 0,
                 "total_tokens": response.usage.total_tokens if response.usage else 0,
-                "cached_tokens": 0  # Not available in standard API
+                "cached_tokens": response.usage.prompt_cached_tokens if response.usage and response.usage.prompt_cached_tokens else 0
             }
             
             print_status(f"o3 usage: {usage_info['prompt_tokens']} prompt + {usage_info['completion_tokens']} completion tokens", Colors.BLUE)
@@ -271,7 +257,7 @@ class PlannerClient:
             
         except Exception as e:
             print_status(f"o3 planner failed, creating fallback plan: {e}", Colors.RED)
-            return self._create_fallback_plan(user_task), {"model": self.model, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
+            return self._create_fallback_plan(user_task), {"model": O3_PLANNER_MODEL, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
     
     def _build_planner_prompt(self, user_task: str) -> str:
         return f"""You are an expert web automation planner. Analyze the user's task and create a structured plan using ONLY generic primitives.
@@ -279,71 +265,55 @@ class PlannerClient:
 USER TASK: {user_task}
 
 AVAILABLE PRIMITIVES:
-- go_to_url: Navigate to a specific URL (target = URL)
-- click: Click on an element (target = selector/description)
-- type: Type text into input fields (target = field, value = text)
-- scroll: Scroll page (value = up/down/to_element)
-- wait: Wait for page/element to load (value = seconds)
-- extract: Extract specific information from page (target = what to extract)
-- analyze_vision: Analyze current page with vision (no parameters needed)
-- search_web: Search web using Serper API (value = search query - REQUIRED!)
+- go_to_url: Navigate to a specific URL
+- click: Click on an element (use descriptive selector)
+- type: Type text into input fields
+- scroll: Scroll page (up/down/to_element)
+- wait: Wait for page/element to load
+- extract: Extract specific information from page
+- analyze_vision: Analyze current page with vision
+- search_web: Search web using Serper API
 
-CRITICAL RULES:
-1. For search_web: ALWAYS set "value" to the search query string
-2. Use analyze_vision after navigation or major DOM changes
-3. Create specific, measurable success criteria
-4. Normalize and clarify the task description
-5. NO domain-specific branching logic
+REQUIREMENTS:
+1. NO domain-specific logic (no Kroger/Target/weather branches)
+2. Be a smart generalist - use generic actions for ANY task
+3. Normalize and clarify the task description
+4. Create concrete success criteria
+5. Use analyze_vision after navigation or major DOM changes
 
-EXAMPLE for search task:
+Output JSON format:
 {{
-  "normalized_task": "Search for product availability at specific store",
+  "normalized_task": "Clear, specific task description",
   "steps": [
     {{
-      "primitive": "search_web",
+      "primitive": "go_to_url",
+      "target": "https://example.com",
+      "value": null,
+      "notes": "Navigate to starting point"
+    }},
+    {{
+      "primitive": "analyze_vision", 
       "target": null,
-      "value": "store name product availability",
-      "notes": "Search for store and product"
-    }},
-    {{
-      "primitive": "analyze_vision",
-      "target": null, 
       "value": null,
-      "notes": "Analyze search results"
-    }},
-    {{
-      "primitive": "click",
-      "target": "first relevant result",
-      "value": null,
-      "notes": "Navigate to store website"
+      "notes": "Understand page layout"
     }}
   ],
   "success_criteria": [
-    "Found store website",
-    "Located product information",
-    "Determined availability status"
+    "Information X is extracted",
+    "Task Y is completed"
   ],
-  "estimated_complexity": "medium"
-}}
-
-Now create a plan for: {user_task}"""
+  "estimated_complexity": "simple|medium|complex"
+}}"""
     
     def _create_fallback_plan(self, user_task: str) -> PlanJSON:
         """Create a minimal fallback plan if o3 planner fails."""
         return PlanJSON(
             normalized_task=f"Complete user request: {user_task}",
             steps=[
-                GenericAction(primitive="search_web", value=user_task, notes="Search for relevant website"),
-                GenericAction(primitive="analyze_vision", notes="Analyze search results"),
-                GenericAction(primitive="click", target="first relevant result", notes="Navigate to appropriate website"),
-                GenericAction(primitive="analyze_vision", notes="Analyze target website"),
-                GenericAction(primitive="extract", target="relevant information", notes="Extract requested information")
+                GenericAction(primitive="analyze_vision", notes="Initial page analysis"),
+                GenericAction(primitive="search_web", value=user_task, notes="Search for information")
             ],
-            success_criteria=[
-                f"Successfully searched for: {user_task}",
-                "Navigated to relevant website",
-                "Found and extracted the requested information"
-            ],
+            success_criteria=[f"Find information related to: {user_task}"],
             estimated_complexity="medium"
         )
 
@@ -358,10 +328,6 @@ class LocalExecutor:
         self.controller = controller
         self.vision_analyzer = vision_analyzer
         self.browser_session: Optional[BrowserSession] = None
-        # Temporarily disable analyze_vision for a few steps after timeouts
-        self.vision_skip_steps_remaining: int = 0
-        # Track consecutive vision timeouts for backoff logic
-        self.vision_timeout_count: int = 0
     
     async def execute_action(self, action: GenericAction, context: ExecutionContext) -> HistoryStep:
         """Execute a single generic action and return result."""
@@ -400,12 +366,7 @@ class LocalExecutor:
                 result = await self._extract(action.target)
                 
             elif action.primitive == "analyze_vision":
-                # Skip analyze_vision temporarily if we recently had a timeout
-                if self.vision_skip_steps_remaining > 0:
-                    self.vision_skip_steps_remaining -= 1
-                    result = ActionResult(extracted_content="Vision temporarily skipped after timeout", include_in_memory=True)
-                else:
-                    result = await self._analyze_vision()
+                result = await self._analyze_vision()
                 # Screenshot already taken in _analyze_vision method
                 screenshot_path = None
                 
@@ -415,12 +376,8 @@ class LocalExecutor:
             else:
                 result = ActionResult(extracted_content=f"Unknown primitive: {action.primitive}", include_in_memory=True)
             
-            # Determine success based on result (more precise error checking)
-            has_content = result.extracted_content is not None and result.extracted_content.strip() != ""
-            has_error = has_content and ("error:" in result.extracted_content.lower() or 
-                                       "failed" in result.extracted_content.lower() or
-                                       "navigation failed" in result.extracted_content.lower())
-            success = has_content and not has_error
+            # Determine success based on result
+            success = result.extracted_content and "error" not in result.extracted_content.lower()
             result_status = "ok" if success else "fail"
             
             return HistoryStep(
@@ -442,166 +399,45 @@ class LocalExecutor:
             )
     
     async def _go_to_url(self, url: str) -> ActionResult:
-        """Navigate to URL using proper controller method with success verification."""
+        """Navigate to URL with 60s timeout."""
         if not self.browser_session:
             raise Exception("Browser session not initialized")
         
-        if not url:
-            return ActionResult(extracted_content="Error: No URL provided", include_in_memory=True)
-        
         print_status(f"Navigating to: {url}", Colors.BLUE)
+        # Use Browser-Use 0.6.x CDP navigation method (same as test_vision.py)
+        await self.browser_session._cdp_navigate(url)
+        await asyncio.sleep(1.0)  # Give page time to load
+        state = await self.browser_session.get_browser_state_summary()
         
-        try:
-            # Get current URL before navigation
-            initial_state = await self.browser_session.get_browser_state_summary()
-            initial_url = initial_state.url if initial_state else ""
-            
-            # Navigate via controller registry API (Controller has no direct go_to_url attribute)
-            result = await self.controller.registry.execute_action(
-                action_name="go_to_url",
-                params={"url": url, "new_tab": False},
-                browser_session=self.browser_session,
-            )
-
-            # Wait longer for page to settle and load
-            await asyncio.sleep(3.0)
-            
-            # Verify navigation success by checking current URL
-            final_state = await self.browser_session.get_browser_state_summary()
-            final_url = final_state.url if final_state else ""
-            
-            # Check if navigation was successful
-            from urllib.parse import urlparse
-            target_domain = urlparse(url).netloc.lower()
-            current_domain = urlparse(final_url).netloc.lower() if final_url else ""
-            
-            if current_domain and target_domain in current_domain:
-                print_status(f"✅ Successfully navigated to: {final_url}", Colors.GREEN)
-                return ActionResult(
-                    extracted_content=f"Successfully navigated to {final_url}", 
-                    include_in_memory=True
-                )
-            elif final_url != initial_url:
-                # URL changed but not to target - may be redirect or search results
-                print_status(f"🔄 Navigation redirected to: {final_url}", Colors.YELLOW)
-                return ActionResult(
-                    extracted_content=f"Navigation redirected to {final_url}", 
-                    include_in_memory=True
-                )
-            else:
-                # URL didn't change - navigation failed
-                print_status(f"❌ Navigation failed - URL unchanged: {final_url}", Colors.RED)
-                return ActionResult(
-                    extracted_content=f"Error: Navigation failed - remained at {final_url}", 
-                    include_in_memory=True
-                )
-                
-        except Exception as e:
-            print_status(f"❌ Navigation error: {e}", Colors.RED)
-            return ActionResult(
-                extracted_content=f"Error: Navigation failed - {str(e)}", 
-                include_in_memory=True
-            )
+        return ActionResult(
+            extracted_content=f"Navigated to {state.url} - {state.title}",
+            include_in_memory=True
+        )
     
     async def _click(self, selector: str) -> ActionResult:
-        """Click element by selector/description."""
+        """Click element by selector."""
         try:
-            if not self.browser_session:
-                raise Exception("Browser session not initialized")
-            
-            # Get current DOM state
-            dom_state = await self.browser_session.get_dom_state()
-            
-            # Try to find matching element by text content or description
-            target_element = None
-            for idx, element in enumerate(dom_state.clickable_elements, 1):
-                element_text = getattr(element, 'text', '') or getattr(element, 'value', '') or ''
-                if selector.lower() in element_text.lower() or element_text.lower() in selector.lower():
-                    target_element = (idx, element)
-                    break
-            
-            if not target_element:
-                # Try first clickable element as fallback
-                if dom_state.clickable_elements:
-                    target_element = (1, dom_state.clickable_elements[0])
-                else:
-                    raise Exception(f"No clickable elements found matching: {selector}")
-            
-            idx, element = target_element
-            
-            # Execute registered click action via controller registry
-            await self.controller.registry.execute_action(
-                action_name="click_element_by_index",
-                params={"index": idx, "while_holding_ctrl": False},
-                browser_session=self.browser_session,
-            )
-
-            await asyncio.sleep(0.5)  # Brief wait for page changes
-            return ActionResult(extracted_content=f"Successfully clicked element {idx}: {selector}", include_in_memory=True)
+            # Browser-Use 0.6.x uses event-driven system for clicks
+            # For now, return placeholder - this needs DOM integration to get element node
+            return ActionResult(extracted_content=f"Click action prepared for: {selector} (requires DOM integration)", include_in_memory=True)
         except Exception as e:
             return ActionResult(extracted_content=f"Click failed: {e}", include_in_memory=True)
     
     async def _type(self, selector: str, text: str) -> ActionResult:
         """Type text into element."""
         try:
-            if not self.browser_session:
-                raise Exception("Browser session not initialized")
-            
-            # Get current DOM state
-            dom_state = await self.browser_session.get_dom_state()
-            
-            # Try to find matching input element
-            target_element = None
-            for idx, element in enumerate(dom_state.input_fields, 1):
-                element_text = getattr(element, 'placeholder', '') or getattr(element, 'label', '') or ''
-                if selector.lower() in element_text.lower() or element_text.lower() in selector.lower():
-                    target_element = (idx, element)
-                    break
-            
-            if not target_element:
-                # Try first input field as fallback
-                if dom_state.input_fields:
-                    target_element = (1, dom_state.input_fields[0])
-                else:
-                    raise Exception(f"No input fields found matching: {selector}")
-            
-            idx, element = target_element
-            
-            # Execute registered input action via controller registry
-            await self.controller.registry.execute_action(
-                action_name="input_text",
-                params={"index": idx, "text": text, "clear_existing": True},
-                browser_session=self.browser_session,
-            )
-
-            await asyncio.sleep(0.3)  # Brief wait for text to register
-            return ActionResult(extracted_content=f"Successfully typed '{text}' into element {idx}: {selector}", include_in_memory=True)
+            # Browser-Use 0.6.x uses event-driven system for typing
+            # For now, return placeholder - this needs DOM integration to get element node
+            return ActionResult(extracted_content=f"Type action prepared for '{text}' into: {selector} (requires DOM integration)", include_in_memory=True)
         except Exception as e:
             return ActionResult(extracted_content=f"Type failed: {e}", include_in_memory=True)
     
     async def _scroll(self, direction: str = "down") -> ActionResult:
         """Scroll page."""
         try:
-            if not self.browser_session:
-                raise Exception("Browser session not initialized")
-            
-            # Use controller's scroll action
-            from browser_use.controller.views import ScrollAction
-
-            # Determine scroll direction flag
-            down_flag = True if str(direction).lower() in ["down", "d", "true", "1", "yes"] else False
-
-            # Build valid ScrollAction (controller expects down + num_pages)
-            scroll_action = ScrollAction(down=down_flag, num_pages=1.0, frame_element_index=None)
-
-            await self.controller.registry.execute_action(
-                action_name="scroll",
-                params={"down": down_flag, "num_pages": 1.0, "frame_element_index": None},
-                browser_session=self.browser_session,
-            )
-
-            await asyncio.sleep(0.3)  # Brief wait for scroll to settle
-            return ActionResult(extracted_content=f"Successfully scrolled {'down' if down_flag else 'up'}", include_in_memory=True)
+            # Browser-Use 0.6.x uses event-driven system for scrolling
+            # For now, return placeholder - this needs DOM integration to get page element
+            return ActionResult(extracted_content=f"Scroll action prepared for: {direction} (requires DOM integration)", include_in_memory=True)
         except Exception as e:
             return ActionResult(extracted_content=f"Scroll failed: {e}", include_in_memory=True)
     
@@ -626,12 +462,10 @@ class LocalExecutor:
         """Analyze current page with local vision model."""
         try:
             state = await self.browser_session.get_browser_state_summary()
-            print_status("Taking screenshot for vision analysis...", Colors.BLUE)
             
             # Take screenshot using Browser-Use 0.6.x event system
             screenshot_event = self.browser_session.event_bus.dispatch(ScreenshotEvent(full_page=False))
             screenshot_b64 = await screenshot_event.event_result(raise_if_any=True, raise_if_none=True)
-            print_status("Screenshot captured successfully", Colors.GREEN)
             
             # Save screenshot to file
             import tempfile
@@ -639,36 +473,10 @@ class LocalExecutor:
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
                 f.write(base64.b64decode(screenshot_b64))
                 screenshot_path = f.name
-            print_status(f"Screenshot saved to: {screenshot_path}", Colors.BLUE)
             
-            print_status("Running vision analysis...", Colors.BLUE)
-
-            # Call vision with a timeout to prevent hanging
-            async def call_vision():
-                return await self.vision_analyzer.analyze(
-                    str(screenshot_path), state.url or "", state.title or ""
-                )
-
-            try:
-                vision_state = await asyncio.wait_for(call_vision(), timeout=300)
-                # Reset timeout counter on success
-                self.vision_timeout_count = 0
-            except asyncio.TimeoutError:
-                # Increase timeout counter and apply backoff policy
-                self.vision_timeout_count += 1
-                # Disable further vision for a few steps and return non-failing content
-                if self.vision_timeout_count >= 2:
-                    # Stronger backoff after two consecutive timeouts
-                    self.vision_skip_steps_remaining = 8
-                    print_status("Two consecutive vision timeouts — disabling analyze_vision for next 8 steps", Colors.YELLOW)
-                else:
-                    self.vision_skip_steps_remaining = 5
-                    print_status("Vision timeout - temporarily disabling analyze_vision for next 5 steps", Colors.YELLOW)
-                # Backoff: insert a brief wait to let the page settle
-                await asyncio.sleep(2)
-                return ActionResult(extracted_content="Vision analysis skipped due to timeout (backoff applied)", include_in_memory=True)
-
-            print_status("Vision analysis completed", Colors.GREEN)
+            vision_state = await self.vision_analyzer.analyze(
+                str(screenshot_path), state.url or "", state.title or ""
+            )
             
             summary = (
                 f"Vision analysis: {vision_state.caption}\n"
@@ -679,44 +487,12 @@ class LocalExecutor:
             
             return ActionResult(extracted_content=summary, include_in_memory=True)
         except Exception as e:
-            print_status(f"Vision analysis error details: {e}", Colors.RED)
-            print_status(f"Error type: {type(e).__name__}", Colors.RED)
-            import traceback
-            traceback.print_exc()
-            return ActionResult(extracted_content=f"Vision analysis failed: {type(e).__name__}: {e}", include_in_memory=True)
+            return ActionResult(extracted_content=f"Vision analysis failed: {e}", include_in_memory=True)
     
     async def _search_web(self, query: str) -> ActionResult:
-        """Search web using Serper API, then open the first result automatically."""
+        """Search web using Serper API."""
         try:
-            if not query or query == "None" or query.strip() == "":
-                print_status(f"⚠️ Invalid search query received: '{query}' - using fallback", Colors.YELLOW)
-                # Try to extract query from action notes or use generic search
-                fallback_query = "Toyota Highlander inventory stock"
-                print_status(f"Using fallback query: '{fallback_query}'", Colors.YELLOW)
-                result = await search_with_serper_fallback(self.controller, fallback_query, 10)
-            else:
-                print_status(f"🔍 Searching for: '{query}'", Colors.BLUE)
-                result = await search_with_serper_fallback(self.controller, query, 10)
-
-            # Try to extract and navigate to the first URL in results
-            try:
-                import re
-                content = result.extracted_content or ""
-                # Prefer lines starting with 'URL:'
-                urls = re.findall(r"URL:\s*(https?://\S+)", content)
-                if not urls:
-                    # Fallback: any bare http(s) links
-                    urls = re.findall(r"https?://[^\s)]+", content)
-                if urls:
-                    first_url = urls[0]
-                    print_status(f"Opening first result: {first_url}", Colors.BLUE)
-                    nav_res = await self._go_to_url(first_url)
-                    # Combine messages so the step is considered successful and we leave the homepage
-                    combined = (result.extracted_content or "") + "\n\nOpened: " + first_url
-                    return ActionResult(extracted_content=combined, include_in_memory=True)
-            except Exception as parse_err:
-                print_status(f"Couldn't open result automatically: {parse_err}", Colors.YELLOW)
-
+            result = await search_with_serper_fallback(self.controller, query, 10)
             return result
         except Exception as e:
             return ActionResult(extracted_content=f"Search failed: {e}", include_in_memory=True)
@@ -750,113 +526,14 @@ class EscalationManager:
                 return True
         
         return False
-
-    def _normalize_action_primitive(self, name: str) -> str:
-        """Map common synonyms to allowed primitives."""
-        n = (name or "").lower().strip()
-        mapping = {
-            "click_link": "click",
-            "click_button": "click",
-            "press": "click",
-            "type_text": "type",
-            "enter_text": "type",
-            "scroll_down": "scroll",
-            "scroll_up": "scroll",
-            "extract_text": "extract",
-            "reload_page": "wait",  # treat reload/refresh as brief wait to settle
-            "refresh": "wait",
-            "open_url": "go_to_url",
-            "go_to": "go_to_url",
-            "open": "go_to_url",
-            "navigate": "go_to_url",
-            "key": "wait",  # degrade unknown key action to brief wait
-            "debug_console": "wait",
-            "analyze_code": "analyze_vision",
-            "comment": "wait",
-        }
-        return mapping.get(n, n)
-
-    def _normalize_microplan_payload(self, data: dict) -> dict:
-        """Normalize micro-plan JSON to fit MicroPlan model constraints."""
-        out = dict(data or {})
-        actions = out.get("next_actions", []) or []
-        norm_actions: list[dict] = []
-        for a in actions:
-            if not isinstance(a, dict):
-                continue
-            prim_raw = a.get("primitive", "")
-            prim = self._normalize_action_primitive(prim_raw)
-            # Build minimal valid GenericAction dict
-            target = a.get("target")
-            value = a.get("value")
-            # If primitive suggests URL nav and value is a URL, move it to target
-            if prim == "go_to_url" and (isinstance(value, str) and value.startswith("http")) and not target:
-                target = value
-                value = None
-            ga = {
-                "primitive": prim,
-                "target": target,
-                "value": value,
-                "notes": a.get("notes"),
-            }
-            # For scroll_down/up synonyms, set value hint
-            if prim_raw.lower() == "scroll_down":
-                ga["value"] = "down"
-            if prim_raw.lower() == "scroll_up":
-                ga["value"] = "up"
-            norm_actions.append(ga)
-        if not norm_actions:
-            norm_actions = [{"primitive": "wait", "value": "2", "notes": "fallback"}]
-        out["next_actions"] = norm_actions[:3]
-        reason = (out.get("reasoning") or "").strip()
-        out["reasoning"] = reason[:200]
-        # Clamp timeout
-        try:
-            out["timeout_steps"] = int(out.get("timeout_steps", 3))
-        except Exception:
-            out["timeout_steps"] = 3
-        return out
-
-    def _normalize_o3_actions_payload(self, data: dict) -> dict:
-        """Normalize o3 JSON to allowed GenericAction schema."""
-        out = dict(data or {})
-        actions = out.get("actions", []) or []
-        norm_actions: list[dict] = []
-        for a in actions:
-            if not isinstance(a, dict):
-                continue
-            prim_in = a.get("primitive", "")
-            prim = self._normalize_action_primitive(prim_in)
-            target = a.get("target")
-            value = a.get("value")
-            if prim == "go_to_url" and (isinstance(value, str) and value.startswith("http")) and not target:
-                target = value
-                value = None
-            ga = {
-                "primitive": prim,
-                "target": target,
-                "value": value,
-                "notes": a.get("notes"),
-            }
-            if prim_in.lower() == "scroll_down":
-                ga["value"] = "down"
-            if prim_in.lower() == "scroll_up":
-                ga["value"] = "up"
-            norm_actions.append(ga)
-        if not norm_actions:
-            norm_actions = [{"primitive": "wait", "value": "2", "notes": "fallback"}]
-        out["actions"] = norm_actions
-        return out
     
     async def get_micro_plan(self, context: ExecutionContext, plan: PlanJSON) -> MicroPlan:
         """Get micro-plan from Gemini when stuck."""
         try:
             print_status("Getting Gemini micro-plan (stuck state)...", Colors.YELLOW)
-            print_status(f"Local model failed {context.stuck_count} times, escalating to Gemini", Colors.YELLOW)
             
             prompt = self._build_micro_plan_prompt(context, plan)
-            # Use proper message type to avoid 'dict' message errors
-            response = await self.gemini_llm.ainvoke([UserMessage(content=prompt)])
+            response = await self.gemini_llm.ainvoke([{"role": "user", "content": prompt}])
             
             # Parse response
             response_text = response.completion.strip()
@@ -866,8 +543,7 @@ class EscalationManager:
                 if json_match:
                     response_text = json_match.group(1)
             
-            raw_data = json.loads(response_text)
-            micro_plan_data = self._normalize_microplan_payload(raw_data)
+            micro_plan_data = json.loads(response_text)
             return MicroPlan(**micro_plan_data)
             
         except Exception as e:
@@ -880,8 +556,7 @@ class EscalationManager:
             print_status("Using o3 last-resort executor (strict budget)...", Colors.RED)
             
             prompt = self._build_o3_escalation_prompt(context, plan)
-            # Use proper message type to avoid 'Unknown message type: dict'
-            response = await self.o3_llm.ainvoke([UserMessage(content=prompt)])
+            response = await self.o3_llm.ainvoke([{"role": "user", "content": prompt}])
             
             # Parse response
             response_text = response.completion.strip()
@@ -891,8 +566,7 @@ class EscalationManager:
                 if json_match:
                     response_text = json_match.group(1)
             
-            raw_actions = json.loads(response_text)
-            actions_data = self._normalize_o3_actions_payload(raw_actions)
+            actions_data = json.loads(response_text)
             actions = [GenericAction(**action) for action in actions_data.get("actions", [])]
             
             # Enforce strict budget
@@ -1130,7 +804,7 @@ class HybridAgent:
             
             return {
                 "task": task,
-                "plan": plan.model_dump(),
+                "plan": plan.dict(),
                 "completed": result["success"],
                 "steps_executed": len(context.history),
                 "escalation_level": context.escalation_level,
@@ -1157,33 +831,20 @@ class HybridAgent:
         max_total_steps = 50  # Overall budget limit
         step_count = 0
         
-        last_failed_signature: tuple[str, str | None, str | None] | None = None
         while context.current_step < len(plan.steps) and step_count < max_total_steps:
             current_action = plan.steps[context.current_step]
-
-            # Simple debounce: if we just failed same action repeatedly, insert a brief wait
-            if current_action and context.history:
-                if context.history[-1].result == "fail":
-                    sig = (current_action.primitive, (current_action.target or None), (current_action.value or None))
-                    if last_failed_signature == sig:
-                        # Replace with short wait to let UI settle
-                        current_action = GenericAction(primitive="wait", value="1", notes="debounce after repeat fail")
-                    last_failed_signature = sig
-                else:
-                    last_failed_signature = None
             
             # Execute action with LocalExecutor
             history_step = await self.local_executor.execute_action(current_action, context)
             context.history.append(history_step)
             step_count += 1
             
-            # Update vision state if this was a navigation or a successful action that likely changed UI
-            if current_action.primitive == "go_to_url" or (history_step.result == "ok" and current_action.primitive in ["click", "type", "scroll", "extract", "analyze_vision"]):
-                print_status(f"Updating vision context after {current_action.primitive} action", Colors.BLUE)
+            # Update vision state if this was a navigation or vision analysis
+            if current_action.primitive in ["go_to_url", "analyze_vision"]:
                 await self._update_vision_context(context)
             
             # Check for success
-            if history_step.result == "ok": 
+            if history_step.result == "ok":
                 context.current_step += 1
                 context.stuck_count = 0
                 context.escalation_level = "local"  # Reset to local on success
@@ -1193,11 +854,9 @@ class HybridAgent:
                 
                 # Check if stuck and escalate
                 if self.escalation_manager.is_stuck(context):
-                    print_status(f"LocalExecutor stuck after {context.stuck_count} failures, escalating...", Colors.YELLOW)
                     escalation_result = await self._handle_escalation(plan, context)
                     if not escalation_result:
                         # Escalation failed, move to next step
-                        print_status(f"Escalation failed, moving to next step", Colors.RED)
                         context.current_step += 1
                         context.stuck_count = 0
             
@@ -1258,7 +917,6 @@ class HybridAgent:
     async def _update_vision_context(self, context: ExecutionContext):
         """Update vision context after navigation or major changes."""
         try:
-            print_status("Taking screenshot for vision context update...", Colors.BLUE)
             state = await self.browser_session.get_browser_state_summary()
             
             # Take screenshot using Browser-Use 0.6.x event system
@@ -1272,68 +930,34 @@ class HybridAgent:
                 f.write(base64.b64decode(screenshot_b64))
                 screenshot_path = f.name
             
-            print_status("Running vision analysis for context update...", Colors.BLUE)
             vision_state = await self.vision_analyzer.analyze(
                 str(screenshot_path), state.url or "", state.title or ""
             )
             
             context.last_vision_state = vision_state
-            print_status(f"Vision context updated: {vision_state.caption[:50]}...", Colors.GREEN)
+            print_status(f"Vision updated: {vision_state.caption[:50]}...", Colors.BLUE)
             
         except Exception as e:
-            print_status(f"Vision update failed: {type(e).__name__}: {e}", Colors.YELLOW)
-            print_status(f"Vision update will use previous state", Colors.YELLOW)
+            print_status(f"Vision update failed: {e}", Colors.YELLOW)
     
     async def _check_success_criteria(self, plan: PlanJSON, context: ExecutionContext) -> Optional[str]:
-        """Check if success criteria are met based on actual plan success criteria."""
-        if len(context.history) < 3:  # Need at least a few steps to evaluate
-            return None
-            
-        # Get recent action results and vision state
-        recent_history = context.history[-5:]  # Check last 5 steps
-        recent_extracts = [step.summary for step in recent_history if "extract" in step.action.primitive.lower()]
-        
-        # Check if we have vision analysis of relevant content
-        if context.last_vision_state:
-            vision_content = context.last_vision_state.caption.lower()
-            
-            # Look for task-specific keywords in vision analysis
-            task_lower = plan.normalized_task.lower()
-            task_keywords = []
-            
-            # Extract key terms from the task
-            if "toyota" in task_lower and "highlander" in task_lower:
-                task_keywords = ["toyota", "highlander", "inventory", "stock", "available", "new"]
-            elif "weather" in task_lower:
-                task_keywords = ["weather", "temperature", "forecast"]
-            elif "price" in task_lower or "cost" in task_lower:
-                task_keywords = ["price", "cost", "$", "buy", "purchase"]
-                
-            # Check if vision content contains relevant keywords
-            keyword_matches = sum(1 for keyword in task_keywords if keyword in vision_content)
-            
-            # If we found relevant content and had successful navigation/extraction
-            if keyword_matches >= 2:
-                successful_actions = [step for step in recent_history if step.result == "ok"]
-                if len(successful_actions) >= 2:
-                    return f"Found relevant content with {keyword_matches} matching keywords: {', '.join(task_keywords[:3])}"
-        
-        # Check if we've completed most of the plan steps successfully
-        if context.current_step >= len(plan.steps) - 1:
-            successful_steps = [step for step in context.history if step.result == "ok"]
-            if len(successful_steps) >= len(plan.steps) * 0.6:  # 60% success rate
-                return f"Completed plan with {len(successful_steps)} successful steps"
+        """Check if success criteria are met."""
+        # Simple heuristic check - in practice, this could be more sophisticated
+        if len(context.history) > 0:
+            recent_successes = [step for step in context.history[-3:] if step.result == "ok"]
+            if len(recent_successes) >= 2:
+                return "Multiple successful actions completed"
         
         return None
     
     def _estimate_cost(self, plan: PlanJSON, context: ExecutionContext, actual_usage: Dict[str, Any] = None) -> Dict[str, Any]:
         """Calculate actual cost based on token usage and current pricing."""
-        # Current pricing per 1M tokens (as of Jan 2025)
+        # Current pricing per 1000 tokens (as of Jan 2025)
         model_pricing = {
-            "o3": {"input": 15.0, "output": 60.0},  # $15/$60 per 1M tokens
-            "o3-mini": {"input": 3.0, "output": 12.0},  # $3/$12 per 1M tokens  
-            "gemini-2.0-flash-exp": {"input": 0.075, "output": 0.30},  # $0.075/$0.30 per 1M tokens
-            "llava-phi3:latest": {"input": 0.0, "output": 0.0},  # Local model - no cost
+            "o3": {"input": 0.015, "output": 0.06},  # $15/$60 per 1M tokens
+            "o3-mini": {"input": 0.003, "output": 0.012},  # $3/$12 per 1M tokens  
+            "gemini-2.0-flash-exp": {"input": 0.000075, "output": 0.0003},  # $0.075/$0.30 per 1M tokens
+            "minicpm-v": {"input": 0.0, "output": 0.0},  # Local model - no cost
         }
         
         cost_breakdown = {
@@ -1355,7 +979,7 @@ class HybridAgent:
             
             if model in model_pricing:
                 pricing = model_pricing[model]
-                model_cost = (prompt_tokens * pricing["input"] / 1_000_000) + (completion_tokens * pricing["output"] / 1_000_000)
+                model_cost = (prompt_tokens * pricing["input"] / 1000) + (completion_tokens * pricing["output"] / 1000)
                 
                 if model == O3_PLANNER_MODEL:
                     cost_breakdown["planner_cost"] = model_cost
@@ -1377,18 +1001,18 @@ class HybridAgent:
             
             # Estimate planner cost (o3)
             o3_pricing = model_pricing[O3_PLANNER_MODEL]
-            planner_cost = (est_prompt_tokens * o3_pricing["input"] / 1_000_000) + (est_completion_tokens * o3_pricing["output"] / 1_000_000)
+            planner_cost = (est_prompt_tokens * o3_pricing["input"] / 1000) + (est_completion_tokens * o3_pricing["output"] / 1000)
             cost_breakdown["planner_cost"] = planner_cost
             cost_breakdown["total_cost"] = planner_cost
             
             # Add escalation costs if needed
             if context.escalation_level == "gemini":
                 gemini_pricing = model_pricing[GEMINI_BACKUP_MODEL]
-                escalation_cost = (500 * gemini_pricing["input"] / 1_000_000) + (200 * gemini_pricing["output"] / 1_000_000)
+                escalation_cost = (500 * gemini_pricing["input"] / 1000) + (200 * gemini_pricing["output"] / 1000)
                 cost_breakdown["escalation_cost"] = escalation_cost
                 cost_breakdown["total_cost"] += escalation_cost
             elif context.escalation_level == "o3":
-                escalation_cost = (1000 * o3_pricing["input"] / 1_000_000) + (400 * o3_pricing["output"] / 1_000_000)
+                escalation_cost = (1000 * o3_pricing["input"] / 1000) + (400 * o3_pricing["output"] / 1000)
                 cost_breakdown["escalation_cost"] = escalation_cost
                 cost_breakdown["total_cost"] += escalation_cost
         
@@ -1468,24 +1092,6 @@ class HybridAgent:
         self.local_executor = LocalExecutor(self.controller, self.vision_analyzer)
         self.local_executor.set_browser_session(self.browser_session)
         
-        # Warm-start MiniCPM-V once with a 1x1 ping image to keep model hot
-        try:
-            print_status("Warming up local VLM (Llava-Phi3) with a tiny ping...", Colors.BLUE)
-            import base64
-            # 1x1 white pixel PNG
-            tiny_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-            # Use the analyzer's call path directly to trigger model load (no file I/O)
-            prompt = self.vision_analyzer.build_vision_prompt()
-            # Ensure exact model tag is resolved before first real call
-            if not self.vision_analyzer.model_name:
-                self.vision_analyzer.model_name = await self.vision_analyzer.resolve_llava_phi3_tag()
-            await self.vision_analyzer.call_llava_phi3(prompt, tiny_png_b64)
-            print_status("Local VLM warm-up complete", Colors.GREEN)
-        except Exception as warm_err:
-            print_status(f"VLM warm-up failed: {warm_err}", Colors.RED)
-            print_status("Please ensure Ollama is running: python ollama_manager.py --health", Colors.YELLOW)
-            raise Exception("Vision model warm-up failed - cannot continue without functional vision")
-        
         print_status("Browser session and LocalExecutor initialized", Colors.GREEN)
 
 # ----------------------------
@@ -1494,45 +1100,20 @@ class HybridAgent:
 
 async def main():
     """Main CLI interface for new hybrid architecture."""
-    print("Hybrid Agent - New Architecture")
-    print("o3 Planner -> LocalExecutor -> Escalation Manager")
-    print("Generic primitives, no domain-specific logic")
-    print("Navigation timeout: 60s (favor reliability)")
+    print("🤖 Hybrid Agent - New Architecture")
+    print("📋 o3 Planner → LocalExecutor → Escalation Manager")
+    print("🎯 Generic primitives, no domain-specific logic")
+    print("⏱️  Navigation timeout: 60s (favor reliability)")
     print("=" * 60)
     
     agent = HybridAgent()
     
-    # Ensure Ollama is properly set up
-    print("\nVerifying Ollama setup...")
-    # Use the VisionAnalyzer's simpler check that only needs HTTP API
-    ollama_available = await agent.vision_analyzer.check_ollama_availability()
-    if not ollama_available:
-        print("Ollama service not running!")
-        print("Please ensure Ollama is installed and running:")
-        print("   1. Install: https://ollama.ai")
-        print("   2. Start: ollama serve")  
-        print("   3. Install model: ollama pull llava-phi3:latest")
-        print("   4. Or run: python ollama_manager.py --setup")
-        print("\nExiting - vision model is required for hybrid agent functionality.")
-        return
-    else:
-        print("Ollama service is running and accessible")
-    
-    # Test model availability
-    try:
-        model_name = await agent.vision_analyzer.resolve_llava_phi3_tag()
-        print(f"Using model: {model_name}")
-    except Exception as e:
-        print(f"Warning: Could not resolve model tag: {e}")
-        print("Will attempt to use llava-phi3:latest")
-    print("")
-    
     while True:
         try:
-            task = input("\nEnter your task (or 'quit' to exit): ").strip()
+            task = input("\n💭 Enter your task (or 'quit' to exit): ").strip()
             
             if task.lower() in ['quit', 'exit', 'q']:
-                print("Goodbye!")
+                print("👋 Goodbye!")
                 break
             
             if not task:
@@ -1567,10 +1148,10 @@ async def main():
             print("=" * 60)
             
         except KeyboardInterrupt:
-            print("\nGoodbye!")
+            print("\n👋 Goodbye!")
             break
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"❌ Error: {e}")
             import traceback
             traceback.print_exc()
 

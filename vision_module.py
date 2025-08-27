@@ -75,57 +75,27 @@ class VisionAnalyzer:
         
         Args:
             endpoint: Ollama API endpoint
-            model_name: Llava-Phi3 model name (auto-resolved if None)
+            model_name: MiniCPM-V model name (auto-resolved if None)
         """
         self.endpoint = endpoint
         self.model_name = model_name
-        self._ollama_available = None  # Cache availability check
     
-    async def check_ollama_availability(self) -> bool:
-        """Check if Ollama service is running and accessible."""
-        if self._ollama_available is not None:
-            return self._ollama_available
-            
+    async def resolve_minicpm_tag(self) -> str:
+        """Resolve MiniCPM-V tag by querying Ollama API."""
         try:
-            timeout_config = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=5.0)
-            async with httpx.AsyncClient(timeout=timeout_config) as client:
-                response = await client.get(f"{self.endpoint}/api/version")
-                self._ollama_available = response.status_code == 200
-                if self._ollama_available:
-                    print(f"[VisionAnalyzer] Ollama service detected at {self.endpoint}")
-                return self._ollama_available
-        except Exception as e:
-            print(f"[VisionAnalyzer] Ollama not available at {self.endpoint}: {type(e).__name__}")
-            print(f"[VisionAnalyzer] To use vision features, install and run: ollama serve")
-            self._ollama_available = False
-            return False
-    
-    async def resolve_llava_phi3_tag(self) -> str:
-        """Resolve Llava-Phi3 tag by querying Ollama API and return the exact model tag."""
-        try:
-            print(f"[VisionAnalyzer] Resolving model tags from {self.endpoint}")
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(f"{self.endpoint}/api/tags")
                 if response.status_code == 200:
                     data = response.json()
-                    available_models = [m.get('name', '') for m in data.get('models', [])]
-                    print(f"[VisionAnalyzer] Available models: {available_models}")
-                    
                     for model in data.get('models', []):
                         model_name = model.get('name', '')
-                        if 'llava-phi3' in model_name.lower():
-                            print(f"[VisionAnalyzer] Found Llava-Phi3 model: {model_name}")
-                            # Return the exact tag as reported by Ollama
-                            return model_name or "llava-phi3:latest"
-                    
-                    print(f"[VisionAnalyzer] No Llava-Phi3 model found, using default")
-                    return "llava-phi3:latest"
+                        if 'minicpm-v' in model_name.lower():
+                            return model_name.replace(':latest', '')
+                    return "minicpm-v"  # Default fallback
                 else:
-                    print(f"[VisionAnalyzer] Failed to get models: HTTP {response.status_code}")
-                    return "llava-phi3:latest"
-        except Exception as e:
-            print(f"[VisionAnalyzer] Error resolving models: {type(e).__name__}: {e}")
-            return "llava-phi3:latest"
+                    return "minicpm-v"
+        except Exception:
+            return "minicpm-v"
     
     def build_vision_prompt(self) -> str:
         """Build the vision analysis prompt."""
@@ -163,11 +133,10 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
   ]
 }"""
     
-    async def call_llava_phi3(self, prompt: str, image_b64: str) -> Dict[str, Any]:
-        """Call Llava-Phi3 via Ollama API with robust error handling."""
+    async def call_minicpm_v(self, prompt: str, image_b64: str) -> Dict[str, Any]:
+        """Call MiniCPM-V via Ollama API with robust error handling."""
         if not self.model_name:
-            self.model_name = await self.resolve_llava_phi3_tag()
-            print(f"[VisionAnalyzer] Resolved model name: {self.model_name}")
+            self.model_name = await self.resolve_minicpm_tag()
         
         payload = {
             "model": self.model_name,
@@ -175,80 +144,41 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             "images": [image_b64],
             "stream": False,
             "format": "json",
-            "keep_alive": 600,  # keep the model hot
             "options": {"temperature": 0.1}
         }
         
-        print(f"[VisionAnalyzer] Calling Llava-Phi3 at {self.endpoint} with model {self.model_name}")
-        print(f"[VisionAnalyzer] Image size: {len(image_b64)} characters")
-        
-        try:
-            # Use shorter timeout to fail fast if ollama is not running
-            timeout_config = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=10.0)
-            async with httpx.AsyncClient(timeout=timeout_config) as client:
-                # httpx enables keep-alive by default; explicit header for clarity
-                response = await client.post(
-                    f"{self.endpoint}/api/generate",
-                    json=payload,
-                    headers={"Connection": "keep-alive"}
-                )
-                
-                print(f"[VisionAnalyzer] Response status: {response.status_code}")
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            response = await client.post(f"{self.endpoint}/api/generate", json=payload)
             
-                if response.status_code != 200:
-                    error_msg = response.text
-                    print(f"[VisionAnalyzer] HTTP Error {response.status_code}: {error_msg[:500]}")
-                    
-                    # Handle memory issues with fallback response
-                    if "system memory" in error_msg.lower() or response.status_code == 500:
-                        print(f"[VisionAnalyzer] 🔄 Using memory fallback response")
-                        return {
-                            "response": """{
-                                "caption": "UI screenshot with interactive elements",
-                                "elements": [
-                                    {
-                                        "role": "other",
-                                        "visible_text": "UI element",
-                                        "attributes": {},
-                                        "selector_hint": "page element",
-                                        "bbox": [0, 0, 100, 50],
-                                        "confidence": 0.5
-                                    }
-                                ],
-                                "fields": [],
-                                "affordances": []
-                            }"""
-                        }
-                    raise Exception(f"HTTP {response.status_code}: {response.text}")
-                
-                response_json = response.json()
-                print(f"[VisionAnalyzer] Got response from local model")
-                return response_json
-                
-        except httpx.TimeoutException as e:
-            print(f"[VisionAnalyzer] ⏰ Timeout calling Ollama: {e}")
-            print(f"[VisionAnalyzer] 🚨 Ollama may be overloaded or model {self.model_name} not available")
-            print(f"[VisionAnalyzer] 🚑 Try: python ollama_manager.py --health")
-            raise Exception(f"Ollama timeout - check model availability: python ollama_manager.py --health")
-        except httpx.ConnectError as e:
-            print(f"[VisionAnalyzer] Connection error to Ollama: {e}")
-            print(f"[VisionAnalyzer] 🚨 Ollama service is not running!")
-            print(f"[VisionAnalyzer] 🚑 Please run: python ollama_manager.py --setup")
-            raise Exception(f"Ollama service required but not running. Run: python ollama_manager.py --setup")
-        except json.JSONDecodeError as e:
-            print(f"[VisionAnalyzer] 📄 JSON decode error: {e}")
-            print(f"[VisionAnalyzer] Raw response: {response.text[:200]}...")
-            raise Exception(f"Invalid JSON response from Ollama: {e}")
-        except Exception as e:
-            print(f"[VisionAnalyzer] Unexpected error: {type(e).__name__}: {e}")
-            raise
+            if response.status_code != 200:
+                error_msg = response.text
+                # Handle memory issues with fallback response
+                if "system memory" in error_msg.lower() or response.status_code == 500:
+                    return {
+                        "response": """{
+                            "caption": "UI screenshot with interactive elements",
+                            "elements": [
+                                {
+                                    "role": "other",
+                                    "visible_text": "UI element",
+                                    "attributes": {},
+                                    "selector_hint": "page element",
+                                    "bbox": [0, 0, 100, 50],
+                                    "confidence": 0.5
+                                }
+                            ],
+                            "fields": [],
+                            "affordances": []
+                        }"""
+                    }
+                raise Exception(f"HTTP {response.status_code}: {response.text}")
+            
+            return response.json()
     
     def parse_vision_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """Parse vision response from Llava-Phi3 with robust error handling."""
+        """Parse vision response from MiniCPM-V with robust error handling."""
         try:
             response_text = response.get('response', '{}')
-            print(f"[VisionAnalyzer] Raw response length: {len(response_text)} chars")
-            print(f"[VisionAnalyzer] Response preview: {response_text[:200]}...")
             
             # Extract JSON from response
             start_idx = response_text.find('{')
@@ -259,14 +189,10 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             else:
                 json_text = response_text
             
-            print(f"[VisionAnalyzer] Extracted JSON length: {len(json_text)} chars")
-            
             vision_data = json.loads(json_text)
-            print(f"[VisionAnalyzer] Successfully parsed JSON response")
             
             # Validate and set defaults
             if not isinstance(vision_data, dict):
-                print(f"[VisionAnalyzer] Response is not a dict, using empty dict")
                 vision_data = {}
                 
             vision_data.setdefault('elements', [])
@@ -274,13 +200,9 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             vision_data.setdefault('affordances', [])
             vision_data.setdefault('caption', 'UI screenshot analysis')
             
-            print(f"[VisionAnalyzer] Found {len(vision_data.get('elements', []))} elements, {len(vision_data.get('fields', []))} fields, {len(vision_data.get('affordances', []))} affordances")
-            
             return vision_data
             
-        except Exception as e:
-            print(f"[VisionAnalyzer] JSON parsing failed: {type(e).__name__}: {e}")
-            print(f"[VisionAnalyzer] Response text: {response_text[:500]}...")
+        except Exception:
             # Return fallback structure on any parsing error
             return {
                 'caption': 'Fallback UI screenshot',
@@ -301,40 +223,17 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             VisionState object with analysis results
         """
         try:
-            # Read and downsize screenshot before encoding to reduce payload
+            # Read and encode screenshot
             screenshot_file = Path(screenshot_path)
             if not screenshot_file.exists():
                 raise FileNotFoundError(f"Screenshot not found: {screenshot_path}")
             
-            # Downsize to ~1280px width JPEG quality ~80
-            try:
-                from PIL import Image  # pillow
-                with Image.open(screenshot_file) as img:
-                    img = img.convert("RGB")
-                    max_width = 1280
-                    if img.width > max_width:
-                        new_height = int(img.height * (max_width / img.width))
-                        img = img.resize((max_width, new_height))
-                    import io
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=80, optimize=True)
-                    image_bytes = buf.getvalue()
-            except Exception:
-                # Fallback to raw file bytes if PIL not available
-                image_bytes = screenshot_file.read_bytes()
+            with open(screenshot_file, 'rb') as f:
+                image_b64 = base64.b64encode(f.read()).decode('utf-8')
             
-            image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-            
-            # Ensure Ollama is available - fail fast if not
-            if not await self.check_ollama_availability():
-                raise Exception(
-                    "Ollama service required but not running. "
-                    "Please run: python ollama_manager.py --setup"
-                )
-
-            # Call Llava-Phi3
+            # Call MiniCPM-V
             prompt = self.build_vision_prompt()
-            response = await self.call_llava_phi3(prompt, image_b64)
+            response = await self.call_minicpm_v(prompt, image_b64)
             
             # Parse response
             vision_data = self.parse_vision_response(response)
