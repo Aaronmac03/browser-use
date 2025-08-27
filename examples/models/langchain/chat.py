@@ -43,8 +43,8 @@ class ChatLangchain(BaseChatModel):
 			return 'google'
 		elif 'groq' in model_class_name:
 			return 'groq'
-		elif 'ollama' in model_class_name:
-			return 'ollama'
+		elif 'llama' in model_class_name or 'llamacpp' in model_class_name:
+			return 'llama_cpp'
 		elif 'deepseek' in model_class_name:
 			return 'deepseek'
 		else:

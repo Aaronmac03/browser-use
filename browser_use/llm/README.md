@@ -6,8 +6,10 @@ We officially support the following LLMs:
 - Anthropic
 - Google
 - Groq
-- Ollama
+- llama.cpp server (for local vision models)
 - DeepSeek
+
+Note: Ollama support has been replaced with llama.cpp server for better reliability with vision models.
 
 ## Migrating from LangChain
 

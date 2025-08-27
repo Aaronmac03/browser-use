@@ -203,13 +203,55 @@ Required environment variables:
 GROQ_API_KEY=
 ```
 
-## Ollama
+## llama.cpp Server
+
+For local vision models like Moondream2, browser-use now supports llama.cpp server with GGUF models as a more reliable alternative to Ollama.
 
 ```python
-from browser_use.llm import ChatOllama
+from browser_use.llm import ChatLlamaCpp
 from browser_use import Agent
 
-llm = ChatOllama(model="llama3.1:8b")
+# Configure llama.cpp server (default: http://localhost:8080)
+llm = ChatLlamaCpp(
+    model="moondream2",  # Model name (informational)
+    host="http://localhost:8080"  # llama.cpp server endpoint
+)
+```
+
+### Setup llama.cpp Server
+
+1. Download and compile [llama.cpp](https://github.com/ggerganov/llama.cpp):
+```bash
+git clone https://github.com/ggerganov/llama.cpp.git
+cd llama.cpp
+make -j
+```
+
+2. Download a Moondream2 GGUF model:
+```bash
+# Example: download from Hugging Face
+wget https://huggingface.co/bartowski/moondream2-GGUF/resolve/main/moondream2-q4_k_m.gguf
+```
+
+3. Start the server:
+```bash
+./llama-server -m moondream2-q4_k_m.gguf --host 0.0.0.0 --port 8080
+```
+
+### Management Utilities
+
+Browser-use includes utilities to manage llama.cpp server:
+
+```python
+from llama_cpp_manager import LlamaCppManager
+
+manager = LlamaCppManager(model_path="./models/moondream2-q4_k_m.gguf")
+
+# Start server
+await manager.ensure_server_running()
+
+# Test vision capability
+result = await manager.test_vision_capability()
 ```
 
 ## Migration Guides

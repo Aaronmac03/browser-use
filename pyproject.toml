@@ -33,7 +33,7 @@ dependencies = [
     "openai==1.99.2",
     "anthropic==0.58.2",
     "groq>=0.30.0",
-    "ollama>=0.5.1",
+    "httpx>=0.25.0",  # For llama.cpp server communication
     "google-api-python-client>=2.174.0",
     "google-auth>=2.40.3",
     "google-auth-oauthlib>=1.2.2",

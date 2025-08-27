@@ -54,7 +54,7 @@ import openai
 from serper_search import search_with_serper_fallback
 
 # Import working vision module from Phase 1
-from vision_module import VisionAnalyzer, VisionState, VisionElement, VisionField, VisionAffordance, VisionMeta
+from vision_module_llamacpp import VisionAnalyzer, VisionState, VisionElement, VisionField, VisionAffordance, VisionMeta
 
 # ----------------------------
 # Configuration
@@ -2203,21 +2203,21 @@ async def main():
     
     agent = HybridAgent()
     
-    # Ensure Ollama is properly set up
-    print("\nVerifying Ollama setup...")
-    # Use the VisionAnalyzer's simpler check that only needs HTTP API
-    ollama_available = await agent.vision_analyzer.check_ollama_availability()
-    if not ollama_available:
-        print("Ollama service not running!")
-        print("Please ensure Ollama is installed and running:")
-        print("   1. Install: https://ollama.ai")
-        print("   2. Start: ollama serve")  
-        print("   3. Install model: ollama pull moondream")
-        print("   4. Or run: python ollama_manager.py --setup")
+    # Ensure llama.cpp server is properly set up
+    print("\nVerifying llama.cpp server setup...")
+    # Use the VisionAnalyzer's server availability check
+    server_available = await agent.vision_analyzer.check_server_availability()
+    if not server_available:
+        print("llama.cpp server not running!")
+        print("Please ensure llama.cpp server is installed and running:")
+        print("   1. Setup: python setup_llamacpp.py")
+        print("   2. Start server: ./run_llamacpp_server.sh or run_llamacpp_server.bat")  
+        print("   3. Verify: curl http://localhost:8080/health")
+        print("   4. Or run: python llama_cpp_manager.py --setup")
         print("\nExiting - vision model is required for hybrid agent functionality.")
         return
     else:
-        print("Ollama service is running and accessible")
+        print("llama.cpp server is running and accessible")
     
     # Test model availability
     try:

@@ -27,11 +27,13 @@ DEFAULT_TASK = (
 async def run():
     agent = HybridAgent()
 
-    # Fast sanity check so failures are obvious up front
-    if not await agent.vision_analyzer.check_ollama_availability():
-        print("Ollama is not running. Start it with:  ollama serve")
-        print("And ensure the model is installed:   ollama pull moondream")
-        return
+    # Fast sanity check and show local vision status
+    server_available = await agent.vision_analyzer.check_server_availability()
+    if server_available:
+        print("✓ llama.cpp server is available for local vision processing")
+    else:
+        print("⚠ llama.cpp server is not available - testing escalation capabilities without local vision")
+        print("  This tests the hybrid agent's ability to operate with cloud-only fallback")
 
     # (Optional) resolve the exact moondream tag for clarity
     try:
