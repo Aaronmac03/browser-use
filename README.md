@@ -175,29 +175,39 @@ See the [MCP documentation](https://docs.browser-use.com/customize/mcp-server) f
 
 Tell your computer what to do, and it gets it done.
 
-## Roadmap
+## 📋 Project Documentation
 
-### Agent
+Our comprehensive "North Star" documentation provides strategic guidance and technical details:
 
+- **[Mission Statement](docs/MISSION.md)** - Our vision, principles, and success criteria
+- **[System Architecture](docs/ARCHITECTURE.md)** - Technical architecture and component interactions  
+- **[Development Roadmap](docs/ROADMAP.md)** - Detailed development phases and milestones
+- **[Security Guidelines](docs/SECURITY.md)** - Security best practices and compliance
+- **[Model Selection Guide](docs/MODELS.md)** - LLM provider comparison and optimization
+
+## Roadmap Highlights
+
+### Phase 1: Performance & Reliability (Q1 2025)
 - [ ] Make agent 3x faster
-- [ ] Reduce token consumption (system prompt, DOM state)
+- [ ] Achieve 95%+ success rate for common tasks
+- [ ] Reduce token consumption by 50%
 
-### DOM Extraction
-
+### Phase 2: Enhanced Intelligence (Q2 2025)
 - [ ] Enable interaction with all UI elements
-- [ ] Improve state representation for UI elements so that any LLM can understand what's on the page
+- [ ] Implement workflow recording and playback
+- [ ] Add advanced reasoning capabilities
 
-### Workflows
+### Phase 3: Parallelization & Scale (Q3 2025)
+- [ ] Enable massive parallel task execution
+- [ ] Build enterprise-grade scalability
+- [ ] Implement intelligent task distribution
 
-- [ ] Let user record a workflow - which we can rerun with browser-use as a fallback
+### Phase 4: User Experience & Templates (Q4 2025)
+- [ ] Create comprehensive template library
+- [ ] Build intuitive user interfaces
+- [ ] Establish community ecosystem
 
-### User Experience
-
-- [ ] Create various templates for tutorial execution, job application, QA testing, social media, etc. which users can just copy & paste.
-
-### Parallelization
-
-- [ ] Human work is sequential. The real power of a browser agent comes into reality if we can parallelize similar tasks. For example, if you want to find contact information for 100 companies, this can all be done in parallel and reported back to a main agent, which processes the results and kicks off parallel subtasks again.
+*See our [detailed roadmap](docs/ROADMAP.md) for complete timelines and success metrics.*
 
 ## Contributing
 

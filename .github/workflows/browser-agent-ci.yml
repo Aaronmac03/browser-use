@@ -1,0 +1,378 @@
+name: Browser Agent CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'browser-agent/**'
+      - '.github/workflows/browser-agent-ci.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'browser-agent/**'
+      - '.github/workflows/browser-agent-ci.yml'
+  schedule:
+    # Run tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  PYTHON_VERSION: '3.11'
+  BROWSER_AGENT_MASTER_PASSWORD: 'test_password_for_ci'
+  HEADLESS: 'true'
+  LOG_LEVEL: 'DEBUG'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+        test-type: ['unit', 'integration', 'security']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('browser-agent/requirements.txt', 'browser-agent/test_requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ matrix.python-version }}-
+          ${{ runner.os }}-pip-
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          chromium-browser \
+          firefox \
+          xvfb \
+          libgconf-2-4 \
+          libxss1 \
+          libxtst6 \
+          libxrandr2 \
+          libasound2 \
+          libpangocairo-1.0-0 \
+          libatk1.0-0 \
+          libcairo-gobject2 \
+          libgtk-3-0 \
+          libgdk-pixbuf2.0-0
+    
+    - name: Install Python dependencies
+      working-directory: browser-agent
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r test_requirements.txt
+    
+    - name: Install Playwright browsers
+      run: |
+        playwright install chromium firefox
+    
+    - name: Set up test environment
+      working-directory: browser-agent
+      run: |
+        mkdir -p logs screenshots downloads cache profiles
+        cp .env.example .env
+        echo "OPENAI_API_KEY=test_key" >> .env
+        echo "ANTHROPIC_API_KEY=test_key" >> .env
+        echo "SERPER_API_KEY=test_key" >> .env
+    
+    - name: Run linting
+      working-directory: browser-agent
+      run: |
+        # Install linting tools
+        pip install flake8 black isort mypy
+        
+        # Run code formatting checks
+        black --check --diff .
+        isort --check-only --diff .
+        
+        # Run linting
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        
+        # Run type checking
+        mypy . --ignore-missing-imports || true
+    
+    - name: Run security checks
+      working-directory: browser-agent
+      run: |
+        # Install security tools
+        pip install bandit safety
+        
+        # Run security vulnerability scan
+        bandit -r . -f json -o bandit-report.json || true
+        
+        # Check for known security vulnerabilities in dependencies
+        safety check --json --output safety-report.json || true
+    
+    - name: Run unit tests
+      if: matrix.test-type == 'unit'
+      working-directory: browser-agent
+      run: |
+        pytest tests/ \
+          -m "not integration and not security and not slow" \
+          --cov=. \
+          --cov-report=xml \
+          --cov-report=html \
+          --cov-report=term-missing \
+          --junit-xml=test-results-unit.xml \
+          --html=test-report-unit.html \
+          --self-contained-html \
+          -v
+    
+    - name: Run integration tests
+      if: matrix.test-type == 'integration'
+      working-directory: browser-agent
+      run: |
+        # Start Xvfb for headless browser testing
+        export DISPLAY=:99
+        Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+        
+        pytest tests/ \
+          -m "integration" \
+          --cov=. \
+          --cov-report=xml \
+          --cov-report=html \
+          --cov-report=term-missing \
+          --junit-xml=test-results-integration.xml \
+          --html=test-report-integration.html \
+          --self-contained-html \
+          --timeout=300 \
+          -v
+    
+    - name: Run security tests
+      if: matrix.test-type == 'security'
+      working-directory: browser-agent
+      run: |
+        pytest tests/ \
+          -m "security" \
+          --cov=. \
+          --cov-report=xml \
+          --cov-report=html \
+          --cov-report=term-missing \
+          --junit-xml=test-results-security.xml \
+          --html=test-report-security.html \
+          --self-contained-html \
+          -v
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.python-version }}-${{ matrix.test-type }}
+        path: |
+          browser-agent/test-results-*.xml
+          browser-agent/test-report-*.html
+          browser-agent/htmlcov/
+          browser-agent/coverage.xml
+          browser-agent/bandit-report.json
+          browser-agent/safety-report.json
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      if: matrix.test-type == 'unit' && matrix.python-version == '3.11'
+      with:
+        file: browser-agent/coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+  performance-tests:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      working-directory: browser-agent
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r test_requirements.txt
+    
+    - name: Run performance tests
+      working-directory: browser-agent
+      run: |
+        pytest tests/ \
+          -m "performance" \
+          --benchmark-only \
+          --benchmark-json=benchmark-results.json \
+          -v
+    
+    - name: Upload performance results
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-results
+        path: browser-agent/benchmark-results.json
+
+  load-tests:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      working-directory: browser-agent
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r test_requirements.txt
+    
+    - name: Run load tests
+      working-directory: browser-agent
+      run: |
+        # Create a simple load test script
+        cat > load_test.py << 'EOF'
+        from locust import HttpUser, task, between
+        import asyncio
+        from models.model_router import ModelRouter, TaskRequirements
+        from config.models import ModelConfigManager, TaskComplexity
+        
+        class BrowserAgentUser(HttpUser):
+            wait_time = between(1, 3)
+            
+            def on_start(self):
+                self.model_config_manager = ModelConfigManager()
+                self.router = ModelRouter(self.model_config_manager)
+            
+            @task
+            def test_model_selection(self):
+                requirements = TaskRequirements(
+                    complexity=TaskComplexity.SIMPLE,
+                    requires_vision=False
+                )
+                # Simulate model selection load
+                asyncio.run(self.router.select_model(requirements))
+        EOF
+        
+        # Run load test for 30 seconds
+        locust -f load_test.py --headless --users 10 --spawn-rate 2 --run-time 30s --host http://localhost:8000 || true
+    
+    - name: Upload load test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: load-test-results
+        path: browser-agent/*.html
+
+  docker-tests:
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Build Docker image
+      working-directory: browser-agent
+      run: |
+        # Create a simple Dockerfile for testing
+        cat > Dockerfile << 'EOF'
+        FROM python:3.11-slim
+        
+        WORKDIR /app
+        
+        # Install system dependencies
+        RUN apt-get update && apt-get install -y \
+            chromium \
+            xvfb \
+            && rm -rf /var/lib/apt/lists/*
+        
+        # Copy requirements and install Python dependencies
+        COPY requirements.txt test_requirements.txt ./
+        RUN pip install --no-cache-dir -r requirements.txt -r test_requirements.txt
+        
+        # Copy application code
+        COPY . .
+        
+        # Set environment variables
+        ENV HEADLESS=true
+        ENV BROWSER_AGENT_MASTER_PASSWORD=test_password
+        ENV DISPLAY=:99
+        
+        # Run tests
+        CMD ["pytest", "tests/", "-m", "not slow", "-v"]
+        EOF
+        
+        docker build -t browser-agent-test .
+    
+    - name: Run tests in Docker
+      run: |
+        docker run --rm browser-agent-test
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: 'browser-agent/'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [test, performance-tests, load-tests, docker-tests, security-scan]
+    if: always()
+    
+    steps:
+    - name: Notify on success
+      if: needs.test.result == 'success'
+      run: |
+        echo "✅ All browser-agent tests passed successfully!"
+        # Add notification logic here (Slack, Discord, etc.)
+    
+    - name: Notify on failure
+      if: needs.test.result == 'failure'
+      run: |
+        echo "❌ Browser-agent tests failed!"
+        # Add notification logic here (Slack, Discord, etc.)
+        exit 1
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [test, performance-tests, load-tests, docker-tests, security-scan]
+    if: always()
+    
+    steps:
+    - name: Cleanup artifacts
+      run: |
+        echo "🧹 Cleaning up temporary files and artifacts..."
+        # Add cleanup logic if needed
