@@ -69,4 +69,3 @@ If you struggle to update or edit files in-place, try shortening your match stri
 If that doesn't work, just insert your new modified code as new lines in the file, then remove the old code in a second step instead of replacing.
 
 - C:\browser-use\browser_use is read only. never make any changes in this folder.
-- be realistic, honest, and pragmatic. don't overhype or be unrealistically optimistic.
