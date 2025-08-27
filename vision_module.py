@@ -8,6 +8,7 @@ Based on successful Phase 1 implementation from aug25.md.
 
 import base64
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -16,13 +17,13 @@ import httpx
 from pydantic import BaseModel, Field
 
 
-def _to_base64_jpeg(path: str, max_dim: int = 1024, quality: int = 80) -> str:
-    """Convert image to optimized base64 JPEG with resizing.
+def _to_base64_jpeg(path: str, max_dim: int = 320, quality: int = 40) -> str:
+    """Convert image to optimized base64 JPEG with aggressive resizing for fast inference.
     
     Args:
         path: Path to image file
-        max_dim: Maximum dimension (width or height) in pixels
-        quality: JPEG quality (1-100)
+        max_dim: Maximum dimension (width or height) in pixels (reduced to 320 for speed)
+        quality: JPEG quality (1-100, reduced to 40 for smaller payload)
         
     Returns:
         Base64 encoded JPEG string
@@ -37,13 +38,15 @@ def _to_base64_jpeg(path: str, max_dim: int = 1024, quality: int = 80) -> str:
     import io, base64
     img = Image.open(path).convert("RGB")
     w, h = img.size
+    
+    # More aggressive resizing for faster inference
     if max(w, h) > max_dim:
         if w >= h:
             nh = int(h * (max_dim / float(w)))
-            img = img.resize((max_dim, nh))
+            img = img.resize((max_dim, nh), Image.Resampling.LANCZOS)
         else:
             nw = int(w * (max_dim / float(h)))
-            img = img.resize((nw, max_dim))
+            img = img.resize((nw, max_dim), Image.Resampling.LANCZOS)
 
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality, optimize=True)
@@ -117,6 +120,20 @@ class VisionAnalyzer:
         self.endpoint = endpoint
         self.model_name = model_name
         self._ollama_available = None  # Cache availability check
+        self.performance_stats = {
+            'total_calls': 0,
+            'successful_calls': 0,
+            'timeout_calls': 0,
+            'avg_response_time': 0.0,
+            'last_successful_time': None
+        }
+        self.circuit_breaker = {
+            'consecutive_failures': 0,
+            'max_failures': 5,  # Allow more failures before circuit breaker
+            'recovery_time': 60,  # 1 minute recovery time
+            'last_failure_time': None,
+            'is_open': False
+        }
     
     async def check_ollama_availability(self) -> bool:
         """Check if Ollama service is running and accessible."""
@@ -164,54 +181,125 @@ class VisionAnalyzer:
             print(f"[VisionAnalyzer] Error resolving models: {type(e).__name__}: {e}")
             return "moondream:latest"
     
+    def _check_circuit_breaker(self) -> bool:
+        """Check if circuit breaker should block the call."""
+        if not self.circuit_breaker['is_open']:
+            return True
+            
+        # Check if recovery time has passed
+        if self.circuit_breaker['last_failure_time']:
+            time_since_failure = time.time() - self.circuit_breaker['last_failure_time']
+            if time_since_failure > self.circuit_breaker['recovery_time']:
+                print(f"[VisionAnalyzer] RETRY: Circuit breaker recovery attempt after {time_since_failure:.0f}s")
+                self.circuit_breaker['is_open'] = False
+                self.circuit_breaker['consecutive_failures'] = 0
+                return True
+        
+        return False
+    
+    def _record_success(self):
+        """Record successful call and reset circuit breaker."""
+        self.circuit_breaker['consecutive_failures'] = 0
+        self.circuit_breaker['is_open'] = False
+        
+    def _record_failure(self):
+        """Record failed call and potentially open circuit breaker."""
+        self.circuit_breaker['consecutive_failures'] += 1
+        self.circuit_breaker['last_failure_time'] = time.time()
+        
+        if self.circuit_breaker['consecutive_failures'] >= self.circuit_breaker['max_failures']:
+            self.circuit_breaker['is_open'] = True
+            print(f"[VisionAnalyzer] WARNING: Circuit breaker opened after {self.circuit_breaker['consecutive_failures']} failures")
+            print(f"[VisionAnalyzer] BLOCKED: Vision calls blocked for {self.circuit_breaker['recovery_time']}s")
+    
+    async def _force_model_cleanup(self) -> None:
+        """Reset model context to prevent state accumulation - keeps model loaded."""
+        try:
+            # Send minimal context reset request
+            cleanup_payload = {
+                "model": self.model_name,
+                "prompt": "reset",  # Minimal prompt to reset context
+                "stream": False,
+                "keep_alive": "30s",
+                "options": {
+                    "num_ctx": 256,  # Minimal context
+                    "num_predict": 1  # Single token response
+                }
+            }
+            
+            timeout = httpx.Timeout(connect=1.0, read=3.0, write=2.0, pool=3.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                await client.post(
+                    f"{self.endpoint}/api/generate",
+                    json=cleanup_payload
+                )
+            print(f"[VisionAnalyzer] Context reset successful")
+        except Exception as e:
+            # Non-critical - just log warning  
+            print(f"[VisionAnalyzer] Context reset failed: {e}")
+    
     def build_vision_prompt(self) -> str:
         """Build the richer vision analysis prompt prioritizing key elements."""
-        return """Analyze this webpage screenshot and identify up to 12 key interactive elements. Prioritize search boxes, price displays, cart/checkout buttons, zip code fields, and cookie/banner buttons.
+        return """Analyze this webpage screenshot and identify up to 8 key interactive elements. Focus on the most important elements only.
 
-Respond with a JSON object (not array) in this exact format:
+CRITICAL JSON FORMAT RULES:
+1. Return ONLY a single JSON object (not array)
+2. NO trailing commas anywhere
+3. NO ellipses (...) or incomplete elements
+4. ALL strings must be properly quoted
+5. ALL arrays and objects must be complete
 
+Required JSON structure:
 {
   "caption": "brief page description",
   "elements": [
     {
-      "role": "button|link|text|input|image|other",
+      "role": "button",
       "visible_text": "exact text shown",
-      "attributes": {"type": "search", "placeholder": "search hint"},
-      "selector_hint": "input[type='search']",
-      "bbox": [x, y, width, height],
-      "confidence": 0.9
+      "attributes": {},
+      "selector_hint": "button",
+      "bbox": [0, 0, 100, 50],
+      "confidence": 0.8
     }
   ],
-  "fields": [
-    {
-      "name_hint": "search|email|zip|address",
-      "value_hint": "current value if visible",
-      "bbox": [x, y, width, height],
-      "editable": true
-    }
-  ],
-  "affordances": [
-    {
-      "type": "button|link|tab|menu|icon",
-      "label": "Search|Add to Cart|Checkout|Accept Cookies",
-      "selector_hint": "button:contains('Search')",
-      "bbox": [x, y, width, height]
-    }
-  ]
+  "fields": [],
+  "affordances": []
 }
 
 PRIORITY ELEMENTS (find these first):
-- Search inputs (type=search, placeholder contains "search")
+- Search inputs and search buttons
 - Price displays ($X.XX, pricing info)
-- Cart/checkout buttons ("Add to Cart", "Checkout", shopping cart icons)
-- Zip code/location fields (zip, postal, location)
-- Cookie/banner buttons ("Accept", "Agree", "Got it", "Close", "X")
-- Navigation menus and primary action buttons
+- Cart/checkout buttons ("Add to Cart", "Checkout")
+- Zip code/location fields
+- Cookie/banner buttons ("Accept", "Close", "X")
+- Primary navigation buttons
 
-Return only the JSON object, no extra text."""
+IMPORTANT: 
+- If you see fewer than 8 elements, that's fine - quality over quantity
+- Every element must be complete with all required fields
+- Use simple, clear text for visible_text field
+- Keep bbox coordinates as integers [x, y, width, height]
+- Set confidence between 0.5-1.0
+
+Return ONLY the complete JSON object. No extra text before or after."""
     
     async def call_moondream(self, prompt: str, image_b64: str) -> Dict[str, Any]:
-        """Call Moondream2 via Ollama API with robust error handling."""
+        """Call Moondream2 via Ollama API with robust error handling and performance tracking."""
+        start_time = time.time()
+        self.performance_stats['total_calls'] += 1
+        
+        # Check circuit breaker
+        if not self._check_circuit_breaker():
+            raise Exception(f"Circuit breaker open - vision temporarily disabled for performance")
+        
+        # Preemptive cleanup to ensure clean state before each call
+        if self.performance_stats['successful_calls'] > 0:  # Only cleanup after first success
+            try:
+                await self._force_model_cleanup()
+                print(f"[VisionAnalyzer] Preemptive cleanup completed")
+            except Exception as cleanup_error:
+                print(f"[VisionAnalyzer] Preemptive cleanup warning: {cleanup_error}")
+        
         if not self.model_name:
             self.model_name = await self.resolve_moondream_tag()
             print(f"[VisionAnalyzer] Resolved model name: {self.model_name}")
@@ -221,12 +309,14 @@ Return only the JSON object, no extra text."""
             "prompt": prompt,
             "images": [image_b64],
             "stream": False,
-            "keep_alive": 300,  # keep the model hot but not too long
+            "keep_alive": "30s",  # Keep model loaded but short duration
             "options": {
                 "temperature": 0.0,  # Deterministic for speed
-                "num_predict": 512,  # Allow more tokens for richer JSON
-                "top_k": 10,  # Slightly more sampling for better JSON
-                "top_p": 0.9   # Better token selection
+                "num_predict": 256,  # Reduced token count for faster generation
+                "top_k": 5,   # Reduced for faster sampling
+                "top_p": 0.8, # Slightly more focused for speed
+                "num_ctx": 256,  # Extremely small context to prevent accumulation
+                "seed": 42  # Fixed seed for consistency
             }
         }
         
@@ -234,11 +324,11 @@ Return only the JSON object, no extra text."""
         print(f"[VisionAnalyzer] Image size: {len(image_b64)} characters")
         
         try:
-            # Increased timeout for reliable local processing
-            timeout = httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=60.0)
-            limits  = httpx.Limits(max_keepalive_connections=2, max_connections=4)
+            # Increased timeout for vision processing - local model needs more time
+            timeout = httpx.Timeout(connect=2.0, read=20.0, write=5.0, pool=20.0)
+            limits  = httpx.Limits(max_keepalive_connections=0, max_connections=1)  # Force fresh connections
             
-            async with httpx.AsyncClient(timeout=timeout, limits=limits, headers={"Connection": "keep-alive"}) as client:
+            async with httpx.AsyncClient(timeout=timeout, limits=limits, headers={"Connection": "close"}) as client:
                 response = await client.post(
                     f"{self.endpoint}/api/generate",
                     json=payload
@@ -252,7 +342,7 @@ Return only the JSON object, no extra text."""
                     
                     # Handle memory issues with fallback response
                     if "system memory" in error_msg.lower() or response.status_code == 500:
-                        print(f"[VisionAnalyzer] 🔄 Using memory fallback response")
+                        print(f"[VisionAnalyzer] FALLBACK: Using memory fallback response")
                         return {
                             "response": """{
                                 "caption": "UI screenshot with interactive elements",
@@ -273,21 +363,46 @@ Return only the JSON object, no extra text."""
                     raise Exception(f"HTTP {response.status_code}: {response.text}")
                 
                 response_json = response.json()
-                print(f"[VisionAnalyzer] Got response from local model")
+                response_time = time.time() - start_time
+                self.performance_stats['successful_calls'] += 1
+                self.performance_stats['last_successful_time'] = response_time
+                
+                # Update rolling average
+                total_successful = self.performance_stats['successful_calls']
+                current_avg = self.performance_stats['avg_response_time']
+                self.performance_stats['avg_response_time'] = (
+                    (current_avg * (total_successful - 1) + response_time) / total_successful
+                )
+                
+                print(f"[VisionAnalyzer] Got response from local model in {response_time:.2f}s")
+                self._record_success()
+                
+                # Force model unload to prevent state accumulation - critical for stability
+                try:
+                    await self._force_model_cleanup()
+                except Exception as cleanup_error:
+                    print(f"[VisionAnalyzer] Model cleanup warning: {cleanup_error}")
+                
                 return response_json
                 
         except httpx.TimeoutException as e:
-            print(f"[VisionAnalyzer] ⏰ Timeout calling Ollama: {e}")
-            print(f"[VisionAnalyzer] 🚨 Ollama may be overloaded or model {self.model_name} not available")
-            print(f"[VisionAnalyzer] 🚑 Try: python ollama_manager.py --health")
+            timeout_time = time.time() - start_time
+            self.performance_stats['timeout_calls'] += 1
+            
+            print(f"[VisionAnalyzer] TIMEOUT calling Ollama after {timeout_time:.1f}s: {e}")
+            print(f"[VisionAnalyzer] Stats: {self.performance_stats['successful_calls']}/{self.performance_stats['total_calls']} success, avg: {self.performance_stats['avg_response_time']:.1f}s")
+            print(f"[VisionAnalyzer] WARNING: Ollama may be overloaded or model {self.model_name} not available")
+            print(f"[VisionAnalyzer] Try: python ollama_manager.py --health")
+            self._record_failure()
             raise Exception(f"Ollama timeout - check model availability: python ollama_manager.py --health")
         except httpx.ConnectError as e:
             print(f"[VisionAnalyzer] Connection error to Ollama: {e}")
-            print(f"[VisionAnalyzer] 🚨 Ollama service is not running!")
-            print(f"[VisionAnalyzer] 🚑 Please run: python ollama_manager.py --setup")
+            print(f"[VisionAnalyzer] WARNING: Ollama service is not running!")
+            print(f"[VisionAnalyzer] Please run: python ollama_manager.py --setup")
+            self._record_failure()
             raise Exception(f"Ollama service required but not running. Run: python ollama_manager.py --setup")
         except json.JSONDecodeError as e:
-            print(f"[VisionAnalyzer] 📄 JSON decode error: {e}")
+            print(f"[VisionAnalyzer] JSON decode error: {e}")
             print(f"[VisionAnalyzer] Raw response: {response.text[:200]}...")
             raise Exception(f"Invalid JSON response from Ollama: {e}")
         except Exception as e:
@@ -295,8 +410,27 @@ Return only the JSON object, no extra text."""
             raise
     
     def _extract_first_json(self, text: str) -> str:
-        """Extract the first valid JSON object or array from text."""
-        # Try to find JSON object first
+        """Extract the first valid JSON object or array from text with robust cleanup."""
+        text = text.strip()
+        
+        # Clean up common JSON issues from LLM responses
+        text = text.replace('...', '').replace('...', '')  # Remove ellipses
+        
+        # If text starts with '[', prioritize array extraction
+        if text.startswith('['):
+            start_idx = text.find('[')
+            if start_idx != -1:
+                bracket_count = 0
+                for i, char in enumerate(text[start_idx:], start_idx):
+                    if char == '[':
+                        bracket_count += 1
+                    elif char == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            extracted = text[start_idx:i+1]
+                            return self._clean_json_string(extracted)
+        
+        # Try to find JSON object
         start_idx = text.find('{')
         if start_idx != -1:
             brace_count = 0
@@ -306,9 +440,10 @@ Return only the JSON object, no extra text."""
                 elif char == '}':
                     brace_count -= 1
                     if brace_count == 0:
-                        return text[start_idx:i+1]
+                        extracted = text[start_idx:i+1]
+                        return self._clean_json_string(extracted)
         
-        # Try to find JSON array
+        # Try to find JSON array (fallback)
         start_idx = text.find('[')
         if start_idx != -1:
             bracket_count = 0
@@ -318,10 +453,53 @@ Return only the JSON object, no extra text."""
                 elif char == ']':
                     bracket_count -= 1
                     if bracket_count == 0:
-                        return text[start_idx:i+1]
+                        extracted = text[start_idx:i+1]
+                        return self._clean_json_string(extracted)
         
         # Fallback to original text
-        return text.strip()
+        return self._clean_json_string(text.strip())
+    
+    def _clean_json_string(self, json_str: str) -> str:
+        """Clean up common JSON formatting issues from LLM responses."""
+        import re
+        
+        # Remove trailing commas before closing brackets/braces
+        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+        
+        # Fix incomplete strings by adding closing quotes
+        lines = json_str.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Skip lines that are just ellipses or incomplete
+            if line in ['...', '...', '..', '.']:
+                continue
+                
+            # If line ends with incomplete string, try to fix it
+            if line.endswith('"') and line.count('"') % 2 == 1:
+                # Odd number of quotes, likely incomplete
+                if line.endswith('",') or line.endswith('"'):
+                    cleaned_lines.append(line)
+                else:
+                    cleaned_lines.append(line + '"')
+            elif '"' in line and line.count('"') % 2 == 1:
+                # Incomplete string in middle of line
+                if not line.endswith('"'):
+                    line = line + '"'
+                cleaned_lines.append(line)
+            else:
+                cleaned_lines.append(line)
+        
+        cleaned_json = '\n'.join(cleaned_lines)
+        
+        # Final cleanup: ensure proper JSON structure
+        cleaned_json = cleaned_json.replace('...', '').replace('...', '')
+        
+        return cleaned_json
 
     def parse_vision_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """Parse vision response from Moondream2 with robust error handling."""
@@ -330,19 +508,109 @@ Return only the JSON object, no extra text."""
             print(f"[VisionAnalyzer] Raw response length: {len(response_text)} chars")
             print(f"[VisionAnalyzer] Response preview: {response_text[:200]}...")
             
-            # Extract first valid JSON object from response
+            # Extract first valid JSON object from response (includes cleanup)
             json_text = self._extract_first_json(response_text)
             print(f"[VisionAnalyzer] Extracted JSON length: {len(json_text)} chars")
             
-            vision_data = json.loads(json_text)
-            print(f"[VisionAnalyzer] Successfully parsed JSON response")
+            # Try multiple JSON parsing strategies
+            vision_data = None
+            parsing_errors = []
+            
+            # Strategy 1: Direct parsing
+            try:
+                vision_data = json.loads(json_text)
+                print(f"[VisionAnalyzer] Successfully parsed JSON response")
+            except json.JSONDecodeError as e:
+                parsing_errors.append(f"Direct parse: {e}")
+                
+                # Strategy 2: Try with additional cleanup
+                try:
+                    import re
+                    # More aggressive cleanup
+                    cleaned = re.sub(r',\s*([}\]])', r'\1', json_text)  # Remove trailing commas
+                    cleaned = re.sub(r'([}\]]),\s*$', r'\1', cleaned)  # Remove trailing comma at end
+                    cleaned = re.sub(r'"\s*:\s*([^",}\]]+)([,}\]])', r'": "\1"\2', cleaned)  # Quote unquoted values
+                    
+                    vision_data = json.loads(cleaned)
+                    print(f"[VisionAnalyzer] Successfully parsed JSON after cleanup")
+                except json.JSONDecodeError as e2:
+                    parsing_errors.append(f"Cleanup parse: {e2}")
+                    
+                    # Strategy 3: Try to fix common issues and parse again
+                    try:
+                        # Fix incomplete JSON by adding missing closing braces/brackets
+                        fixed_json = json_text
+                        
+                        # Remove incomplete trailing elements (lines ending with comma but no closing)
+                        lines = fixed_json.split('\n')
+                        cleaned_lines = []
+                        for line in lines:
+                            line = line.strip()
+                            if line and not line.endswith(','):
+                                cleaned_lines.append(line)
+                            elif line.endswith(','):
+                                # Check if this looks like an incomplete element
+                                if '"bbox":' in line and not line.count('[') == line.count(']'):
+                                    # Skip incomplete bbox lines
+                                    continue
+                                else:
+                                    cleaned_lines.append(line)
+                        
+                        fixed_json = '\n'.join(cleaned_lines)
+                        
+                        # Count and fix unmatched braces/brackets
+                        open_braces = fixed_json.count('{') - fixed_json.count('}')
+                        open_brackets = fixed_json.count('[') - fixed_json.count(']')
+                        
+                        if open_braces > 0:
+                            fixed_json += '}' * open_braces
+                        if open_brackets > 0:
+                            fixed_json += ']' * open_brackets
+                            
+                        # Clean up trailing commas again
+                        fixed_json = re.sub(r',\s*([}\]])', r'\1', fixed_json)
+                        
+                        vision_data = json.loads(fixed_json)
+                        print(f"[VisionAnalyzer] Successfully parsed JSON after structure fix")
+                    except json.JSONDecodeError as e3:
+                        parsing_errors.append(f"Structure fix: {e3}")
+                        
+                        # Strategy 4: Last resort - return minimal valid structure
+                        print(f"[VisionAnalyzer] All parsing failed, using minimal fallback")
+                        vision_data = {
+                            "caption": "UI screenshot (parsing failed)",
+                            "elements": [],
+                            "fields": [],
+                            "affordances": []
+                        }
+            
+            if vision_data is None:
+                raise json.JSONDecodeError(f"Failed to parse JSON: {'; '.join(parsing_errors)}", json_text, 0)
             
             # Handle case where model returns array instead of object
             if isinstance(vision_data, list):
                 print(f"[VisionAnalyzer] Model returned array, converting to object format")
+                # Check if it's a list of link-like dicts
+                converted_elements = []
+                for item in vision_data:
+                    if isinstance(item, dict):
+                        # Convert link-like dict to our schema
+                        element = {
+                            "role": "link" if item.get('url') or item.get('href') else "other",
+                            "visible_text": item.get('name', '') or item.get('visible_text', '') or item.get('text', ''),
+                            "attributes": {},
+                            "selector_hint": f"a[href*='{item.get('url', item.get('href', ''))}']" if item.get('url') or item.get('href') else "element",
+                            "bbox": [int(float(x)) for x in item.get('bbox', [0, 0, 0, 0])[:4]] if item.get('bbox') else [0, 0, 0, 0],
+                            "confidence": float(item.get('confidence', 0.5))
+                        }
+                        # Add href to attributes if present
+                        if item.get('url') or item.get('href'):
+                            element['attributes']['href'] = item.get('url') or item.get('href')
+                        converted_elements.append(element)
+                
                 vision_data = {
                     "caption": "UI screenshot with interactive elements",
-                    "elements": vision_data,  # Use the array as elements
+                    "elements": converted_elements,
                     "fields": [],
                     "affordances": []
                 }
@@ -350,6 +618,7 @@ Return only the JSON object, no extra text."""
                 print(f"[VisionAnalyzer] Response is not a dict or array, using empty dict")
                 vision_data = {}
                 
+            # Ensure all required keys exist with empty arrays as defaults
             vision_data.setdefault('elements', [])
             vision_data.setdefault('fields', [])
             vision_data.setdefault('affordances', [])
@@ -358,18 +627,35 @@ Return only the JSON object, no extra text."""
             # Convert bbox coordinates from floats to integers and fix attributes
             for element in vision_data.get('elements', []):
                 if 'bbox' in element and isinstance(element['bbox'], list):
-                    element['bbox'] = [int(float(x)) for x in element['bbox']]
+                    element['bbox'] = [int(float(x)) for x in element['bbox'][:4]]  # Ensure max 4 values
                 # Fix attributes if it's an array instead of dict
                 if 'attributes' in element and isinstance(element['attributes'], list):
                     element['attributes'] = {}
+                # Ensure required fields exist
+                element.setdefault('role', 'other')
+                element.setdefault('visible_text', '')
+                element.setdefault('attributes', {})
+                element.setdefault('selector_hint', '')
+                element.setdefault('bbox', [0, 0, 0, 0])
+                element.setdefault('confidence', 0.5)
             
             for field in vision_data.get('fields', []):
                 if 'bbox' in field and isinstance(field['bbox'], list):
-                    field['bbox'] = [int(float(x)) for x in field['bbox']]
+                    field['bbox'] = [int(float(x)) for x in field['bbox'][:4]]
+                # Ensure required fields exist
+                field.setdefault('name_hint', '')
+                field.setdefault('value_hint', '')
+                field.setdefault('bbox', [0, 0, 0, 0])
+                field.setdefault('editable', True)
                     
             for affordance in vision_data.get('affordances', []):
                 if 'bbox' in affordance and isinstance(affordance['bbox'], list):
-                    affordance['bbox'] = [int(float(x)) for x in affordance['bbox']]
+                    affordance['bbox'] = [int(float(x)) for x in affordance['bbox'][:4]]
+                # Ensure required fields exist
+                affordance.setdefault('type', 'button')
+                affordance.setdefault('label', '')
+                affordance.setdefault('selector_hint', '')
+                affordance.setdefault('bbox', [0, 0, 0, 0])
             
             print(f"[VisionAnalyzer] Found {len(vision_data.get('elements', []))} elements, {len(vision_data.get('fields', []))} fields, {len(vision_data.get('affordances', []))} affordances")
             
@@ -378,7 +664,7 @@ Return only the JSON object, no extra text."""
         except Exception as e:
             print(f"[VisionAnalyzer] JSON parsing failed: {type(e).__name__}: {e}")
             print(f"[VisionAnalyzer] Response text: {response_text[:500]}...")
-            # Return fallback structure on any parsing error
+            # Return fallback structure on any parsing error - never crash
             return {
                 'caption': 'Fallback UI screenshot',
                 'elements': [],
@@ -397,14 +683,28 @@ Return only the JSON object, no extra text."""
         Returns:
             VisionState object with analysis results
         """
+        start_time = time.time()
         try:
+            # Check circuit breaker before expensive operations
+            if not self._check_circuit_breaker():
+                return VisionState(
+                    caption="Vision analysis temporarily disabled due to repeated failures",
+                    meta=VisionMeta(
+                        url=page_url,
+                        title=page_title,
+                        model_name="circuit_breaker",
+                        confidence=0.0,
+                        processing_time=0.01
+                    )
+                )
+            
             # Read and downsize screenshot before encoding to reduce payload
             screenshot_file = Path(screenshot_path)
             if not screenshot_file.exists():
                 raise FileNotFoundError(f"Screenshot not found: {screenshot_path}")
             
-            # Use optimized JPEG conversion with 512px max dimension and better quality
-            image_b64 = _to_base64_jpeg(screenshot_path, max_dim=512, quality=60)
+            # Use aggressive optimization for fast inference
+            image_b64 = _to_base64_jpeg(screenshot_path, max_dim=240, quality=30)
             
             # Ensure Ollama is available - fail fast if not
             if not await self.check_ollama_availability():
@@ -433,7 +733,7 @@ Return only the JSON object, no extra text."""
                     timestamp=datetime.now().isoformat(),
                     model_name=self.model_name or "moondream:latest",
                     confidence=0.8,
-                    processing_time=0.0
+                    processing_time=time.time() - start_time
                 )
             )
             
