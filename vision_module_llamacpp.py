@@ -11,7 +11,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 import httpx
 from pydantic import BaseModel, Field
@@ -112,18 +112,30 @@ class VisionState(BaseModel):
 class VisionAnalyzer:
 	"""Clean vision analyzer for Browser-Use integration using llama.cpp server."""
 	
-	def __init__(self, endpoint: str = "http://localhost:8080", model_path: Optional[str] = None):
+	def __init__(self, endpoint: str = "http://localhost:8080", model_path: Optional[str] = None, 
+				enable_cache: bool = True):
 		"""Initialize vision analyzer with llama.cpp server.
 		
 		Args:
 			endpoint: llama.cpp server API endpoint
 			model_path: Path to Moondream2 GGUF model file
+			enable_cache: Enable vision response caching
 		"""
 		self.endpoint = endpoint
 		self.model_path = model_path
 		self.model_name = None  # Initialize model_name attribute
 		self.manager = LlamaCppManager(endpoint=endpoint, model_path=model_path)
 		self._server_available = None  # Cache availability check
+		
+		# Initialize vision cache if enabled
+		self.cache_enabled = enable_cache
+		self.vision_cache = None
+		if enable_cache:
+			try:
+				from vision_cache import VisionCache
+				self.vision_cache = VisionCache()
+			except ImportError:
+				print("[VisionAnalyzer] Vision caching disabled - vision_cache module not available")
 		self.performance_stats = {
 			'total_calls': 0,
 			'successful_calls': 0,
@@ -134,9 +146,13 @@ class VisionAnalyzer:
 		self.circuit_breaker = {
 			'consecutive_failures': 0,
 			'max_failures': 5,  # Allow more failures before circuit breaker
-			'recovery_time': 60,  # 1 minute recovery time
+			'base_recovery_time': 30,  # Base recovery time in seconds
+			'max_recovery_time': 300,  # Maximum recovery time (5 minutes)
+			'backoff_multiplier': 2.0,  # Exponential backoff multiplier
 			'last_failure_time': None,
-			'is_open': False
+			'is_open': False,
+			'half_open_attempts': 0,  # Track attempts in half-open state
+			'max_half_open_attempts': 3  # Max attempts in half-open before full open
 		}
 	
 	async def check_server_availability(self) -> bool:
@@ -162,35 +178,68 @@ class VisionAnalyzer:
 		self.circuit_breaker['consecutive_failures'] = 0
 		self.circuit_breaker['is_open'] = False
 		self.circuit_breaker['last_failure_time'] = None
+		self.circuit_breaker['half_open_attempts'] = 0
 	
 	async def _handle_circuit_breaker_failure(self):
-		"""Handle circuit breaker failure logic."""
+		"""Handle circuit breaker failure logic with exponential backoff."""
 		self.circuit_breaker['consecutive_failures'] += 1
 		self.circuit_breaker['last_failure_time'] = time.time()
 		
 		if self.circuit_breaker['consecutive_failures'] >= self.circuit_breaker['max_failures']:
 			self.circuit_breaker['is_open'] = True
-			print(f"[VisionAnalyzer] Circuit breaker opened after {self.circuit_breaker['consecutive_failures']} failures")
+			
+			# Calculate exponential backoff recovery time
+			failures = self.circuit_breaker['consecutive_failures']
+			recovery_time = min(
+				self.circuit_breaker['base_recovery_time'] * (self.circuit_breaker['backoff_multiplier'] ** (failures - self.circuit_breaker['max_failures'])),
+				self.circuit_breaker['max_recovery_time']
+			)
+			
+			print(f"[VisionAnalyzer] Circuit breaker opened after {failures} failures (recovery in {recovery_time:.1f}s)")
 	
-	async def _check_circuit_breaker(self) -> bool:
-		"""Check if circuit breaker allows requests."""
+	async def _check_circuit_breaker(self) -> Tuple[bool, str]:
+		"""Check if circuit breaker allows requests with exponential backoff.
+		
+		Returns:
+			Tuple of (allow_request, state_description)
+		"""
 		if not self.circuit_breaker['is_open']:
-			return True
+			return True, "closed"
 		
-		# Check if recovery time has passed
-		if (self.circuit_breaker['last_failure_time'] is not None and 
-			(time.time() - self.circuit_breaker['last_failure_time']) > self.circuit_breaker['recovery_time']):
-			print("[VisionAnalyzer] Circuit breaker recovery time elapsed, attempting reset")
-			self.circuit_breaker['is_open'] = False
-			return True
+		if self.circuit_breaker['last_failure_time'] is None:
+			return False, "open"
 		
-		return False
+		# Calculate exponential backoff recovery time
+		failures = self.circuit_breaker['consecutive_failures']
+		recovery_time = min(
+			self.circuit_breaker['base_recovery_time'] * (self.circuit_breaker['backoff_multiplier'] ** max(0, failures - self.circuit_breaker['max_failures'])),
+			self.circuit_breaker['max_recovery_time']
+		)
+		
+		time_since_failure = time.time() - self.circuit_breaker['last_failure_time']
+		
+		if time_since_failure >= recovery_time:
+			# Enter half-open state - allow limited attempts
+			if self.circuit_breaker['half_open_attempts'] < self.circuit_breaker['max_half_open_attempts']:
+				self.circuit_breaker['half_open_attempts'] += 1
+				print(f"[VisionAnalyzer] Circuit breaker half-open: attempt {self.circuit_breaker['half_open_attempts']}/{self.circuit_breaker['max_half_open_attempts']}")
+				return True, "half_open"
+			else:
+				# Too many half-open failures, back to full open with increased backoff
+				self.circuit_breaker['half_open_attempts'] = 0
+				self.circuit_breaker['last_failure_time'] = time.time()
+				print(f"[VisionAnalyzer] Circuit breaker back to open state - recovery in {recovery_time * self.circuit_breaker['backoff_multiplier']:.1f}s")
+				return False, "open"
+		
+		remaining_time = recovery_time - time_since_failure
+		return False, f"open (recovery in {remaining_time:.1f}s)"
 	
 	async def _call_llama_cpp_vision(self, image_b64: str, prompt: str, timeout: float = 30.0) -> Dict[str, Any]:
 		"""Call llama.cpp server vision API with error handling and performance tracking."""
 		
-		if not await self._check_circuit_breaker():
-			return {"error": "Circuit breaker open", "performance_issue": True}
+		allow_request, breaker_state = await self._check_circuit_breaker()
+		if not allow_request:
+			return {"error": f"Circuit breaker {breaker_state}", "performance_issue": True}
 		
 		self.performance_stats['total_calls'] += 1
 		start_time = time.time()
@@ -253,17 +302,76 @@ class VisionAnalyzer:
 			await self._handle_circuit_breaker_failure()
 			return {"error": str(e)}
 	
-	async def analyze(self, screenshot_path: str, page_url: str = "", page_title: str = "", include_affordances: bool = True) -> VisionState:
-		"""Analyze screenshot and return structured vision state.
+	async def analyze_with_retry(self, screenshot_path: str, page_url: str = "", 
+								page_title: str = "", include_affordances: bool = True,
+								max_retries: int = 3) -> VisionState:
+		"""Analyze screenshot with retry and parameter variation."""
 		
-		Args:
-			screenshot_path: Path to screenshot image
-			page_url: Current page URL (optional)
-			page_title: Current page title (optional)
+		# Retry parameters - progressive fallback
+		retry_configs = [
+			{'timeout': 30.0, 'max_tokens': 1024, 'temperature': 0.1, 'prompt_type': 'detailed'},
+			{'timeout': 45.0, 'max_tokens': 512, 'temperature': 0.2, 'prompt_type': 'simplified'},
+			{'timeout': 60.0, 'max_tokens': 256, 'temperature': 0.3, 'prompt_type': 'basic'}
+		]
+		
+		last_error = None
+		
+		for attempt in range(min(max_retries, len(retry_configs))):
+			config = retry_configs[attempt]
 			
-		Returns:
-			VisionState object with analysis results
-		"""
+			if attempt > 0:
+				print(f"[VisionAnalyzer] Retry attempt {attempt + 1}/{max_retries} with {config['prompt_type']} config")
+				# Small delay between retries
+				await asyncio.sleep(2 ** attempt)  # Exponential delay
+			
+			try:
+				result = await self._analyze_with_config(
+					screenshot_path, page_url, page_title, include_affordances, config
+				)
+				
+				# Check if result is acceptable
+				if result.meta.confidence > 0.3:  # Minimum acceptable confidence
+					if attempt > 0:
+						print(f"[VisionAnalyzer] Retry successful on attempt {attempt + 1}")
+					
+					# Cache successful result if caching is enabled
+					if self.vision_cache is not None and result.meta.confidence > 0.5:
+						try:
+							prompt = self.build_vision_prompt()
+							model_variant = self.model_name or "default"
+							result_dict = result.model_dump() if hasattr(result, 'model_dump') else result.__dict__
+							
+							await self.vision_cache.put(
+								screenshot_path, prompt, result_dict,
+								result.meta.confidence, result.meta.processing_time, model_variant
+							)
+						except Exception as e:
+							print(f"[VisionAnalyzer] Failed to cache retry result: {e}")
+					
+					return result
+				else:
+					last_error = f"Low confidence result: {result.meta.confidence}"
+					
+			except Exception as e:
+				last_error = str(e)
+				print(f"[VisionAnalyzer] Attempt {attempt + 1} failed: {e}")
+		
+		# If all retries failed, return minimal result
+		print(f"[VisionAnalyzer] All retry attempts failed, last error: {last_error}")
+		vision_state = VisionState()
+		vision_state.meta.timestamp = datetime.now().isoformat()
+		vision_state.meta.model_name = "moondream2-gguf"
+		vision_state.meta.url = page_url
+		vision_state.meta.title = page_title
+		vision_state.caption = f"Vision analysis failed after {max_retries} attempts: {last_error}"
+		vision_state.meta.confidence = 0.0
+		
+		return vision_state
+	
+	async def _analyze_with_config(self, screenshot_path: str, page_url: str, 
+								 page_title: str, include_affordances: bool,
+								 config: Dict[str, Any]) -> VisionState:
+		"""Internal analyze method with specific configuration."""
 		start_time = time.time()
 		
 		# Initialize basic vision state
@@ -283,56 +391,155 @@ class VisionAnalyzer:
 		try:
 			# Convert image to base64
 			image_b64 = _to_base64_jpeg(screenshot_path)
-			print(f"[VisionAnalyzer] Image optimized: {len(image_b64)} chars")
 			
-			# Step 1: Basic caption and description
-			caption_prompt = """Analyze this screenshot and provide:
-1. A brief caption (max 50 words) describing what you see
-2. List any visible text, buttons, links, or form fields
-3. Describe the overall UI layout and purpose
-
-Be concise and focus on actionable elements."""
+			# Select prompt based on config
+			if config.get('prompt_type') == 'basic':
+				prompt = "Describe what you see in this image briefly."
+			elif config.get('prompt_type') == 'simplified':
+				prompt = """Analyze this webpage screenshot. Provide:
+1. Brief description of the page
+2. List main interactive elements (buttons, links)
+3. Any visible text or prices"""
+			else:  # detailed
+				prompt = self.build_vision_prompt()
 			
-			caption_result = await self._call_llama_cpp_vision(image_b64, caption_prompt, timeout=20.0)
+			# Call vision API with config parameters
+			result = await self._call_llama_cpp_vision_with_config(image_b64, prompt, config)
 			
-			if "error" in caption_result:
-				vision_state.caption = f"Analysis failed: {caption_result['error']}"
-				vision_state.meta.confidence = 0.0
-				vision_state.meta.processing_time = time.time() - start_time
-				return vision_state
+			if "error" in result:
+				raise Exception(f"Vision call failed: {result['error']}")
 			
-			# Parse basic response
-			analysis_text = caption_result["content"]
+			# Parse response
+			analysis_text = result["content"]
 			vision_state.caption = self._extract_caption(analysis_text)
 			
-			# Step 2: Extract elements (if affordances are requested)
-			if include_affordances:
-				elements_prompt = """Analyze this UI screenshot and identify interactive elements. For each clickable element, provide:
-- Type (button, link, text, input field, etc.)
-- Visible text or label
-- Approximate position description (top-left, center, bottom-right, etc.)
-
-Focus on elements a user can interact with."""
+			# Extract elements only for detailed analysis
+			if config.get('prompt_type') == 'detailed' and include_affordances:
+				elements_prompt = """Identify clickable elements in this UI. List each element with its type (button/link) and text."""
 				
-				elements_result = await self._call_llama_cpp_vision(image_b64, elements_prompt, timeout=25.0)
+				elements_result = await self._call_llama_cpp_vision_with_config(image_b64, elements_prompt, config)
 				
 				if "error" not in elements_result:
 					vision_state.elements = self._parse_elements(elements_result["content"])
 					vision_state.affordances = self._elements_to_affordances(vision_state.elements)
 			
-			# Update metadata
-			vision_state.meta.confidence = 0.8 if "error" not in caption_result else 0.3
+			# Set confidence based on config quality and content richness
+			base_confidence = 0.8 if config.get('prompt_type') == 'detailed' else 0.6
+			content_bonus = min(0.2, len(vision_state.caption) / 200.0)
+			vision_state.meta.confidence = min(1.0, base_confidence + content_bonus)
+			
 			vision_state.meta.processing_time = time.time() - start_time
 			
-			print(f"[VisionAnalyzer] Analysis complete in {vision_state.meta.processing_time:.2f}s")
 			return vision_state
 			
 		except Exception as e:
-			print(f"[VisionAnalyzer] Analysis failed: {str(e)}")
-			vision_state.caption = f"Analysis error: {str(e)}"
+			vision_state.caption = f"Analysis error with {config.get('prompt_type', 'default')} config: {str(e)}"
 			vision_state.meta.confidence = 0.0
 			vision_state.meta.processing_time = time.time() - start_time
-			return vision_state
+			raise
+	
+	async def _call_llama_cpp_vision_with_config(self, image_b64: str, prompt: str, 
+											   config: Dict[str, Any]) -> Dict[str, Any]:
+		"""Call vision API with specific configuration parameters."""
+		allow_request, breaker_state = await self._check_circuit_breaker()
+		if not allow_request:
+			return {"error": f"Circuit breaker {breaker_state}", "performance_issue": True}
+		
+		self.performance_stats['total_calls'] += 1
+		start_time = time.time()
+		
+		timeout = config.get('timeout', 30.0)
+		max_tokens = config.get('max_tokens', 1024)
+		temperature = config.get('temperature', 0.1)
+		
+		try:
+			timeout_config = httpx.Timeout(connect=5.0, read=timeout, write=10.0, pool=10.0)
+			
+			async with httpx.AsyncClient(timeout=timeout_config) as client:
+				payload = {
+					"messages": [{
+						"role": "user",
+						"content": [
+							{"type": "text", "text": prompt},
+							{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+						]
+					}],
+					"max_tokens": max_tokens,
+					"temperature": temperature,
+					"stream": False
+				}
+				
+				response = await client.post(f"{self.endpoint}/v1/chat/completions", json=payload)
+				response.raise_for_status()
+				
+				result = response.json()
+				
+				if "choices" not in result or not result["choices"]:
+					return {"error": "No response choices from server"}
+				
+				content = result["choices"][0]["message"]["content"]
+				
+				# Success tracking
+				elapsed = time.time() - start_time
+				self.performance_stats['successful_calls'] += 1
+				self.performance_stats['last_successful_time'] = time.time()
+				
+				# Update rolling average
+				total_successful = self.performance_stats['successful_calls']
+				old_avg = self.performance_stats['avg_response_time']
+				self.performance_stats['avg_response_time'] = ((old_avg * (total_successful - 1)) + elapsed) / total_successful
+				
+				await self._reset_circuit_breaker()
+				
+				return {"content": content, "response_time": elapsed}
+				
+		except asyncio.TimeoutError:
+			self.performance_stats['timeout_calls'] += 1
+			await self._handle_circuit_breaker_failure()
+			return {"error": "Request timed out", "timeout": True}
+			
+		except httpx.HTTPStatusError as e:
+			await self._handle_circuit_breaker_failure()
+			return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
+			
+		except Exception as e:
+			await self._handle_circuit_breaker_failure()
+			return {"error": str(e)}
+	
+	async def analyze(self, screenshot_path: str, page_url: str = "", page_title: str = "", include_affordances: bool = True) -> VisionState:
+		"""Analyze screenshot and return structured vision state with built-in retry.
+		
+		Args:
+			screenshot_path: Path to screenshot image
+			page_url: Current page URL (optional)
+			page_title: Current page title (optional)
+			
+		Returns:
+			VisionState object with analysis results
+		"""
+		# Try cache first if enabled
+		if self.vision_cache is not None:
+			prompt = self.build_vision_prompt()
+			model_variant = self.model_name or "default"
+			
+			cached_result = await self.vision_cache.get(screenshot_path, prompt, model_variant)
+			if cached_result is not None:
+				print(f"[VisionAnalyzer] Cache hit (similarity: {cached_result.get('cache_similarity', 1.0):.2f})")
+				
+				# Update metadata with current context
+				if 'meta' in cached_result:
+					cached_result['meta']['url'] = page_url
+					cached_result['meta']['title'] = page_title
+					cached_result['meta']['timestamp'] = datetime.now().isoformat()
+				
+				try:
+					return VisionState(**cached_result)
+				except Exception as e:
+					print(f"[VisionAnalyzer] Failed to reconstruct from cache: {e}")
+					# Fall through to fresh analysis
+		
+		# Use retry analysis for fresh analysis
+		return await self.analyze_with_retry(screenshot_path, page_url, page_title, include_affordances)
 	
 	def _extract_caption(self, analysis_text: str) -> str:
 		"""Extract concise caption from analysis text."""
@@ -468,10 +675,99 @@ IMPORTANT:
 			print(f"[VisionAnalyzer] Error resolving model: {type(e).__name__}: {e}")
 			return "moondream2-gguf"
 	
+	async def warm_up_model(self, timeout: float = 30.0) -> Dict[str, Any]:
+		"""Warm up the vision model with optimized test calls.
+		
+		Args:
+			timeout: Maximum time to spend on warm-up
+			
+		Returns:
+			Dict with warm-up results and timing
+		"""
+		print(f"[VisionAnalyzer] Starting model warm-up (timeout: {timeout}s)")
+		start_time = time.time()
+		
+		# Ensure server is available
+		if not await self.check_server_availability():
+			if not await self.manager.ensure_server_running():
+				return {
+					'success': False,
+					'error': 'Server not available',
+					'elapsed': time.time() - start_time
+				}
+		
+		# Resolve model name if not set
+		if not self.model_name:
+			self.model_name = await self.resolve_moondream_tag()
+		
+		# Create minimal test image (1x1 white pixel PNG)
+		tiny_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+		
+		# Progressive warm-up with increasing complexity
+		warm_up_prompts = [
+			"What color is this image?",  # Simple question
+			"Describe what you see.",      # Medium complexity  
+			"List interactive elements."   # Full complexity
+		]
+		
+		successful_calls = 0
+		total_attempts = len(warm_up_prompts)
+		
+		try:
+			for i, prompt in enumerate(warm_up_prompts):
+				call_timeout = min(10.0, (timeout - (time.time() - start_time)) / (total_attempts - i))
+				if call_timeout <= 0:
+					break
+					
+				print(f"[VisionAnalyzer] Warm-up call {i+1}/{total_attempts}...")
+				
+				try:
+					result = await asyncio.wait_for(
+						self._call_llama_cpp_vision(tiny_png_b64, prompt, timeout=call_timeout),
+						timeout=call_timeout + 2.0
+					)
+					
+					if "error" not in result:
+						successful_calls += 1
+						print(f"[VisionAnalyzer] Warm-up call {i+1} successful ({result.get('response_time', 0):.2f}s)")
+					else:
+						print(f"[VisionAnalyzer] Warm-up call {i+1} failed: {result['error']}")
+				
+				except asyncio.TimeoutError:
+					print(f"[VisionAnalyzer] Warm-up call {i+1} timed out")
+					break
+				except Exception as e:
+					print(f"[VisionAnalyzer] Warm-up call {i+1} exception: {e}")
+		
+		except Exception as e:
+			print(f"[VisionAnalyzer] Warm-up process failed: {e}")
+		
+		elapsed = time.time() - start_time
+		success_rate = successful_calls / total_attempts
+		
+		# Reset circuit breaker on successful warm-up
+		if success_rate >= 0.5:  # At least half the warm-up calls succeeded
+			await self._reset_circuit_breaker()
+			print(f"[VisionAnalyzer] Model warm-up successful ({success_rate:.1%} success, {elapsed:.1f}s)")
+		else:
+			print(f"[VisionAnalyzer] Model warm-up completed with issues ({success_rate:.1%} success, {elapsed:.1f}s)")
+		
+		return {
+			'success': success_rate >= 0.5,
+			'success_rate': success_rate,
+			'successful_calls': successful_calls,
+			'total_attempts': total_attempts,
+			'elapsed': elapsed,
+			'model_name': self.model_name
+		}
+	
 	async def get_performance_stats(self) -> Dict[str, Any]:
 		"""Get performance statistics."""
 		stats = self.performance_stats.copy()
 		stats['circuit_breaker'] = self.circuit_breaker.copy()
+		if self.vision_cache is not None:
+			cache_stats = await self.vision_cache.get_stats()
+			stats['cache'] = cache_stats
 		return stats
 
 
