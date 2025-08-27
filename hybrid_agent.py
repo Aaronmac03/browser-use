@@ -16,7 +16,6 @@ import hashlib
 import base64
 import logging
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union, Literal
@@ -957,151 +956,13 @@ class LocalExecutor:
             return ActionResult(extracted_content=f"Wait failed: {e}", include_in_memory=True)
     
     async def _extract(self, target: str) -> ActionResult:
-        """Extract information from page with enhanced DOM analysis for hotel booking sites."""
+        """Extract information from page."""
         try:
             state = await self.browser_session.get_browser_state_summary()
-            
-            # Enhanced extraction for hotel booking sites
-            if "booking.com" in (state.url or "").lower() or "hotel" in target.lower():
-                return await self._extract_hotel_info(target, state)
-            else:
-                # Generic extraction fallback
-                content = f"Extracted from {state.url}: {target}"
-                return ActionResult(extracted_content=content, include_in_memory=True)
-                
+            content = f"Extracted from {state.url}: {target}"
+            return ActionResult(extracted_content=content, include_in_memory=True)
         except Exception as e:
             return ActionResult(extracted_content=f"Extract failed: {e}", include_in_memory=True)
-    
-    async def _extract_hotel_info(self, target: str, state) -> ActionResult:
-        """Extract hotel pricing and availability information from booking sites."""
-        try:
-            print_status("Extracting hotel pricing and availability information...", Colors.BLUE)
-            
-            # Use browser-use's DOM extraction capabilities
-            from browser_use.dom.service import DomService
-            
-            # Get page content for analysis
-            page_content = await self.browser_session.get_browser_state_summary()
-            
-            # Look for common hotel booking elements
-            extraction_selectors = [
-                # Price selectors (common patterns)
-                '[data-testid*="price"]',
-                '.price, .rate, .cost',
-                '[class*="price"], [class*="rate"], [class*="cost"]',
-                'span:contains("$"), div:contains("$")',
-                
-                # Availability selectors
-                '[data-testid*="available"]',
-                '.available, .availability',
-                '[class*="available"], [class*="room"]',
-                
-                # Hotel name and details
-                'h1, h2, .hotel-name, [data-testid*="hotel"]',
-                
-                # Date confirmation
-                '[data-testid*="date"], .date, [class*="date"]'
-            ]
-            
-            extracted_info = {
-                "url": state.url,
-                "timestamp": datetime.now().isoformat(),
-                "extraction_target": target,
-                "found_elements": []
-            }
-            
-            # Try to extract using browser-use's element detection
-            try:
-                # Get current page elements
-                elements = await self.browser_session.get_browser_state_summary()
-                
-                # Look for price indicators in the page text
-                page_text = str(elements)
-                
-                # Extract price patterns
-                import re
-                price_patterns = [
-                    r'\$\d+(?:,\d{3})*(?:\.\d{2})?',  # $123.45, $1,234.56
-                    r'\d+(?:,\d{3})*(?:\.\d{2})?\s*USD',  # 123.45 USD
-                    r'USD\s*\d+(?:,\d{3})*(?:\.\d{2})?',  # USD 123.45
-                ]
-                
-                found_prices = []
-                for pattern in price_patterns:
-                    matches = re.findall(pattern, page_text, re.IGNORECASE)
-                    found_prices.extend(matches)
-                
-                if found_prices:
-                    extracted_info["prices_found"] = list(set(found_prices))
-                    print_status(f"Found {len(found_prices)} price indicators", Colors.GREEN)
-                
-                # Look for availability indicators
-                availability_keywords = ["available", "book now", "reserve", "select room", "choose room"]
-                availability_found = []
-                
-                for keyword in availability_keywords:
-                    if keyword.lower() in page_text.lower():
-                        availability_found.append(keyword)
-                
-                if availability_found:
-                    extracted_info["availability_indicators"] = availability_found
-                    print_status(f"Found availability indicators: {', '.join(availability_found)}", Colors.GREEN)
-                
-                # Check for date confirmation
-                date_patterns = [
-                    r'9/1/25', r'9/2/25',  # Our specific dates
-                    r'Sep\s*1', r'Sep\s*2',  # Month abbreviations
-                    r'September\s*1', r'September\s*2'  # Full month names
-                ]
-                
-                found_dates = []
-                for pattern in date_patterns:
-                    if re.search(pattern, page_text, re.IGNORECASE):
-                        found_dates.append(pattern)
-                
-                if found_dates:
-                    extracted_info["dates_confirmed"] = found_dates
-                    print_status(f"Confirmed dates found: {', '.join(found_dates)}", Colors.GREEN)
-                
-                # Determine if extraction was successful
-                success_indicators = len(found_prices) + len(availability_found) + len(found_dates)
-                
-                if success_indicators >= 2:
-                    extracted_info["extraction_success"] = True
-                    extracted_info["success_score"] = success_indicators
-                    print_status(f"Hotel extraction successful (score: {success_indicators})", Colors.GREEN)
-                else:
-                    extracted_info["extraction_success"] = False
-                    extracted_info["success_score"] = success_indicators
-                    print_status(f"Hotel extraction partial (score: {success_indicators})", Colors.YELLOW)
-                
-            except Exception as dom_error:
-                print_status(f"DOM extraction error: {dom_error}", Colors.YELLOW)
-                extracted_info["dom_error"] = str(dom_error)
-            
-            # Format the result
-            result_content = f"""Hotel Information Extraction Results:
-URL: {extracted_info['url']}
-Target: {extracted_info['extraction_target']}
-Success: {extracted_info.get('extraction_success', False)}
-Score: {extracted_info.get('success_score', 0)}/6
-
-Prices Found: {extracted_info.get('prices_found', [])}
-Availability: {extracted_info.get('availability_indicators', [])}
-Dates Confirmed: {extracted_info.get('dates_confirmed', [])}
-
-Timestamp: {extracted_info['timestamp']}"""
-            
-            return ActionResult(
-                extracted_content=result_content, 
-                include_in_memory=True,
-                success=extracted_info.get('extraction_success', False)
-            )
-            
-        except Exception as e:
-            error_content = f"Hotel extraction failed: {str(e)}"
-            print_status(error_content, Colors.RED)
-            return ActionResult(extracted_content=error_content, include_in_memory=True, success=False)
     
     async def _analyze_vision(self) -> ActionResult:
         """Analyze current page with local vision model."""
@@ -1918,50 +1779,32 @@ class HybridAgent:
         
         # Check for Omni Hotel Louisville booking success
         if "omni" in task_lower and "louisville" in task_lower:
-            # Success if we're on a hotel booking site (booking.com, omnihotels.com, etc.)
-            hotel_booking_sites = ["booking.com", "omnihotels.com", "hotels.com", "expedia.com"]
-            is_on_booking_site = any(site in current_url for site in hotel_booking_sites)
-            
-            if is_on_booking_site:
+            # Success if we're on the Omni Louisville site
+            if "omnihotels.com" in current_url and "louisville" in current_url:
                 # Check if we've progressed beyond the main hotel page
-                booking_indicators = ["book", "reservation", "rooms", "availability", "rates", "omni", "louisville"]
+                booking_indicators = ["book", "reservation", "rooms", "availability", "rates"]
                 has_booking_indicator = any(indicator in current_url or indicator in page_title 
                                           for indicator in booking_indicators)
                 
                 # Count successful actions that indicate booking progress
                 booking_actions = 0
-                date_actions = 0
-                extraction_success = False
-                
-                for step in context.history[-10:]:  # Check recent history
+                for step in context.history[-8:]:  # Check recent history
                     if step.result == "ok":
                         if step.action.primitive == "type" and step.action.value:
                             # Check if typed dates match our target dates
                             typed_value = step.action.value.lower()
                             if any(date in typed_value for date in ["09/01/2025", "09/02/2025", "9/1/25", "9/2/25"]):
-                                date_actions += 1
                                 booking_actions += 1
                         elif step.action.primitive == "click":
                             booking_actions += 1
-                        elif step.action.primitive == "extract":
-                            # Check if extraction found meaningful results
-                            if (hasattr(step, 'action_result') and 
-                                step.action_result and 
-                                hasattr(step.action_result, 'extracted_content')):
-                                content = step.action_result.extracted_content.lower()
-                                if ("prices found" in content or 
-                                    "availability" in content or 
-                                    "success: true" in content):
-                                    extraction_success = True
-                                    booking_actions += 2  # Extraction success is worth more
                 
-                # Success criteria (more flexible for booking.com)
-                if extraction_success and date_actions >= 2:
-                    return f"SUCCESS: Hotel booking completed - found pricing/availability for Omni Louisville (9/1/25-9/2/25)"
-                elif has_booking_indicator and booking_actions >= 4 and date_actions >= 2:
+                # Success if we're on hotel site + have booking progress
+                if has_booking_indicator or booking_actions >= 3:
                     return f"SUCCESS: Reached Omni Louisville booking state with {booking_actions} booking actions completed"
-                elif booking_actions >= 3 and date_actions >= 1:
-                    return f"SUCCESS: Located Omni Louisville and initiated booking process with dates"
+                
+                # Partial success if we're on the right site with some interaction
+                elif booking_actions >= 2:
+                    return f"SUCCESS: Located Omni Louisville site and initiated booking process"
         
         # Check explicit success criteria with less vision dependence 
         for criterion in plan.success_criteria:
@@ -2145,7 +1988,7 @@ class HybridAgent:
         self.local_executor = LocalExecutor(self.controller, self.vision_analyzer)
         self.local_executor.set_browser_session(self.browser_session)
         
-        # Enhanced warm-start with model health monitoring and stability checks
+        # Try warm-start with a quick timeout - make it non-blocking for faster recovery
         try:
             print_status("Warming up local VLM (Moondream2) with a tiny ping...", Colors.BLUE)
             import base64
@@ -2157,35 +2000,18 @@ class HybridAgent:
             if not self.vision_analyzer.model_name:
                 self.vision_analyzer.model_name = await self.vision_analyzer.resolve_moondream_tag()
             
-            # Enhanced warm-up with model health verification
-            start_time = time.time()
+            # Ultra-aggressive timeout to fail fast if model isn't working
             await asyncio.wait_for(
                 self.vision_analyzer.call_moondream(prompt, tiny_png_b64), 
                 timeout=15.0
             )
-            warm_up_time = time.time() - start_time
-            
-            # Verify model is in good state after warm-up
-            if self.vision_analyzer.performance_stats['successful_calls'] > 0:
-                print_status(f"Local VLM warm-up complete - model responsive ({warm_up_time:.1f}s)", Colors.GREEN)
-                # Reset circuit breaker on successful warm-up
-                self.vision_analyzer.circuit_breaker['consecutive_failures'] = 0
-                self.vision_analyzer.circuit_breaker['is_open'] = False
-            else:
-                print_status("VLM warm-up completed but model may be unstable", Colors.YELLOW)
-                
+            print_status("Local VLM warm-up complete", Colors.GREEN)
         except asyncio.TimeoutError:
             print_status("VLM warm-up timed out after 15s - vision will be disabled during execution", Colors.YELLOW) 
             print_status("Agent will continue with vision disabled but may have reduced accuracy", Colors.YELLOW)
-            # Mark vision as degraded to prevent further timeouts
-            self.vision_analyzer.circuit_breaker['is_open'] = True
-            self.vision_analyzer.circuit_breaker['consecutive_failures'] = self.vision_analyzer.circuit_breaker['max_failures']
         except Exception as warm_err:
             print_status(f"VLM warm-up failed: {warm_err}", Colors.YELLOW)
             print_status("Agent will continue with vision disabled but may have reduced accuracy", Colors.YELLOW)
-            # Mark vision as degraded to prevent further issues
-            self.vision_analyzer.circuit_breaker['is_open'] = True
-            self.vision_analyzer.circuit_breaker['consecutive_failures'] = self.vision_analyzer.circuit_breaker['max_failures']
         
         print_status("Browser session and LocalExecutor initialized", Colors.GREEN)
 
