@@ -1,17 +1,17 @@
-#!/usr/bin/env python3
 """
-Hybrid Local-Vision + Cloud-Reasoning Agent for Browser-Use 0.6.x
+Hybrid Local-Vision + Cloud-Reasoning Agent
 
 A hybrid browser automation system that uses:
 - Local VLM (MiniCPM-V 2.6) for fast vision processing and simple actions
 - Cloud reasoning (Gemini 2.0 Flash) for complex planning and decision making
+
+Based on agent.py but with hybrid vision system replacing direct browser automation.
 """
 
 import asyncio
 import json
 import os
 import hashlib
-import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
@@ -24,23 +24,46 @@ import httpx
 # Load environment variables
 load_dotenv(override=True)
 
-# Browser-Use 0.6.x imports
-from browser_use import Agent, Controller, ActionResult
-from browser_use.browser import BrowserProfile, BrowserSession
-from browser_use.llm import ChatGoogle, ChatOpenAI
+async def resolve_minicpm_tag(endpoint: str = "http://localhost:11434") -> str:
+    """
+    Resolve MiniCPM-V tag by querying Ollama API to avoid hardcoded :latest.
+    
+    Returns:
+        str: Resolved model tag (e.g., 'minicpm-v')
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{endpoint}/api/tags")
+            if response.status_code == 200:
+                data = response.json()
+                # Find minicpm model
+                for model in data.get('models', []):
+                    model_name = model.get('name', '')
+                    if 'minicpm-v' in model_name.lower():
+                        # Return without :latest suffix
+                        return model_name.replace(':latest', '')
+                # Fallback if not found
+                return "minicpm-v"
+            else:
+                return "minicpm-v"  # Default fallback
+    except Exception:
+        return "minicpm-v"  # Default fallback
 
-# Import serper search functionality
+from browser_use import Agent, BrowserSession, Controller, BrowserProfile
+from browser_use.llm import ChatGoogle
+
+# Import existing functionality from agent.py
 from serper_search import search_with_serper_fallback
 
 # ----------------------------
-# Data Schemas
+# Data Schemas (from hybrid_brief.md)
 # ----------------------------
 
 class VisionElement(BaseModel):
     """Individual UI element detected by vision system."""
     role: str = Field(description="Element type: button|link|text|image|other")
     visible_text: str = Field(description="Text content visible to user")
-    attributes: Dict[str, str] = Field(description="HTML attributes", default_factory=dict)
+    attributes: Dict[str, str] = Field(description="HTML attributes like ariaLabel, type", default_factory=dict)
     selector_hint: str = Field(description="CSS/XPath selector hint for targeting")
     bbox: List[int] = Field(description="Bounding box [x,y,w,h]")
     confidence: float = Field(description="Vision confidence score 0-1")
@@ -101,62 +124,65 @@ class PlannerResponse(BaseModel):
     needs_more_context: bool = Field(description="Whether more context is needed")
 
 # ----------------------------
-# Ollama Helper
-# ----------------------------
-
-async def resolve_minicpm_tag(endpoint: str = "http://localhost:11434") -> str:
-    """Resolve MiniCPM-V tag by querying Ollama API."""
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{endpoint}/api/tags")
-            if response.status_code == 200:
-                data = response.json()
-                for model in data.get('models', []):
-                    model_name = model.get('name', '')
-                    if 'minicpm-v' in model_name.lower():
-                        return model_name.replace(':latest', '')
-                return "minicpm-v"
-            else:
-                return "minicpm-v"
-    except Exception as e:
-        # Concise warning - don't fail loudly
-        print(f"⚠️ Ollama API not available: {str(e)[:50]}")
-        return "minicpm-v"
-
-# ----------------------------
 # Vision State Builder
 # ----------------------------
 
 class VisionStateBuilder:
     """Builds VisionState from screenshots using local MiniCPM-V 2.6."""
     
-    def __init__(self, model_endpoint: str = "http://localhost:11434", model_name: Optional[str] = None):
+    def __init__(self, 
+                 model_endpoint: str = "http://localhost:11434",
+                 model_name: Optional[str] = None):
+        """
+        Initialize vision state builder.
+        
+        Args:
+            model_endpoint: Ollama server endpoint
+            model_name: Model identifier in Ollama (auto-resolved if None)
+        """
         self.model_endpoint = model_endpoint.rstrip('/')
-        self.model_name = model_name
+        self.model_name = model_name  # Will be resolved at runtime
         self.client = httpx.AsyncClient(timeout=60.0)
+        
+        # Cache for avoiding duplicate processing
         self.vision_cache = {}
         
     async def build_vision_state(self, screenshot_path: str, page_url: str, page_title: str) -> VisionState:
-        """Build VisionState from screenshot using local VLM."""
+        """
+        Build VisionState from screenshot using local VLM.
+        
+        Args:
+            screenshot_path: Path to screenshot file
+            page_url: Current page URL  
+            page_title: Current page title
+            
+        Returns:
+            VisionState with detected elements and metadata
+        """
         # Check cache first
-        screenshot_hash = self._hash_screenshot(screenshot_path)
+        screenshot_hash = await self._hash_screenshot(screenshot_path)
         if screenshot_hash in self.vision_cache:
             cached_state = self.vision_cache[screenshot_hash]
+            # Update metadata but keep vision analysis
             cached_state.meta.url = page_url
             cached_state.meta.title = page_title
             cached_state.meta.timestamp = datetime.now().isoformat()
             return cached_state
         
-        # Encode screenshot
+        # Encode screenshot for vision model
         with open(screenshot_path, 'rb') as f:
+            import base64
             image_b64 = base64.b64encode(f.read()).decode('utf-8')
         
+        # Craft prompt for structured UI analysis
         prompt = self._build_vision_prompt()
         
         try:
+            # Call local VLM via Ollama API
             response = await self._call_local_vlm(prompt, image_b64)
             vision_data = self._parse_vision_response(response)
             
+            # Build VisionState
             vision_state = VisionState(
                 caption=vision_data.get('caption', 'UI screenshot'),
                 elements=[VisionElement(**elem) for elem in vision_data.get('elements', [])],
@@ -165,19 +191,26 @@ class VisionStateBuilder:
                 meta=VisionMeta(
                     url=page_url,
                     title=page_title,
-                    scrollY=0,
+                    scrollY=0,  # TODO: Get actual scroll position
                     timestamp=datetime.now().isoformat()
                 )
             )
             
+            # Cache result
             self.vision_cache[screenshot_hash] = vision_state
             return vision_state
             
         except Exception as e:
-            print(f"⚠️ Vision analysis failed but continuing: {e}")
+            print(f"Vision analysis failed: {e}")
+            print(f"Exception type: {type(e)}")
+            import traceback
+            print("Full traceback:")
+            traceback.print_exc()
+            # Return minimal fallback state
             return self._fallback_vision_state(page_url, page_title)
     
     def _build_vision_prompt(self) -> str:
+        """Build prompt for vision model to extract structured UI data."""
         return """Analyze this screenshot and extract UI elements as JSON.
 
 Find buttons, links, input fields, text, and interactive elements. Return JSON only:
@@ -213,6 +246,8 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
 }"""
 
     async def _call_local_vlm(self, prompt: str, image_b64: str) -> Dict[str, Any]:
+        """Call local VLM via Ollama API."""
+        # Resolve model name if not set
         if not self.model_name:
             self.model_name = await resolve_minicpm_tag(self.model_endpoint)
         
@@ -222,24 +257,53 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             "images": [image_b64],
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.1}
+            "options": {
+                "temperature": 0.1
+            }
         }
         
-        response = await self.client.post(
-            f"{self.model_endpoint}/api/generate",
-            json=payload
-        )
+        print(f"🔗 Calling Ollama API at {self.model_endpoint}/api/generate")
+        print(f"📦 Model: {self.model_name}")
         
-        if response.status_code != 200:
-            raise Exception(f"HTTP {response.status_code}: {response.text}")
-        
-        return response.json()
+        try:
+            response = await self.client.post(
+                f"{self.model_endpoint}/api/generate",
+                json=payload
+            )
+            
+            print(f"📡 HTTP Status: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"❌ HTTP Error {response.status_code}: {response.text}")
+                raise Exception(f"HTTP {response.status_code}: {response.text}")
+            
+            result = response.json()
+            response_text = result.get('response', '')
+            print(f"✅ API Response received: {len(response_text)} chars")
+            print(f"📄 First 100 chars: {response_text[:100]}")
+            
+            # Check if the response indicates completion
+            if result.get('done') == True and response_text:
+                return result
+            else:
+                print(f"⚠️ Incomplete response: done={result.get('done')}")
+                return result
+            
+        except Exception as e:
+            print(f"❌ API call failed: {str(e)}")
+            raise
     
     def _parse_vision_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse vision model response into structured data."""
         try:
+            # Extract JSON from response
             response_text = response.get('response', '{}')
+            print(f"📄 Raw response: {response_text[:200]}...")
             
-            # Extract JSON
+            # Sometimes the model returns text before/after JSON, try to extract just the JSON
+            response_text = response_text.strip()
+            
+            # Try to find JSON block if wrapped in other text
             start_idx = response_text.find('{')
             end_idx = response_text.rfind('}') + 1
             
@@ -248,21 +312,27 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             else:
                 json_text = response_text
             
+            print(f"🔍 Parsing JSON: {json_text[:100]}...")
             vision_data = json.loads(json_text)
             
-            # Validate and set defaults
+            # Validate and clean data
             if not isinstance(vision_data, dict):
                 vision_data = {}
                 
-            vision_data.setdefault('elements', [])
-            vision_data.setdefault('fields', [])
-            vision_data.setdefault('affordances', [])
-            vision_data.setdefault('caption', 'UI screenshot analysis')
-            
-            # Validate elements
+            if 'elements' not in vision_data:
+                vision_data['elements'] = []
+            if 'fields' not in vision_data:
+                vision_data['fields'] = []
+            if 'affordances' not in vision_data:
+                vision_data['affordances'] = []
+            if 'caption' not in vision_data:
+                vision_data['caption'] = 'UI screenshot analysis'
+                
+            # Validate elements structure
             valid_elements = []
             for elem in vision_data.get('elements', []):
                 if isinstance(elem, dict):
+                    # Set defaults for missing fields
                     elem.setdefault('role', 'other')
                     elem.setdefault('visible_text', '')
                     elem.setdefault('attributes', {})
@@ -272,9 +342,12 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
                     valid_elements.append(elem)
             vision_data['elements'] = valid_elements
                 
+            print(f"✅ Parsed successfully: {len(vision_data['elements'])} elements, {len(vision_data['fields'])} fields")
             return vision_data
             
         except (json.JSONDecodeError, KeyError) as e:
+            print(f"❌ Failed to parse vision response: {e}")
+            print(f"📄 Response was: {response_text[:500]}")
             return {
                 'caption': 'Vision analysis parsing failed',
                 'elements': [],
@@ -283,6 +356,7 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             }
     
     def _fallback_vision_state(self, page_url: str, page_title: str) -> VisionState:
+        """Return minimal fallback vision state when analysis fails."""
         return VisionState(
             caption="Vision analysis unavailable",
             elements=[],
@@ -296,7 +370,8 @@ Find buttons, links, input fields, text, and interactive elements. Return JSON o
             )
         )
     
-    def _hash_screenshot(self, screenshot_path: str) -> str:
+    async def _hash_screenshot(self, screenshot_path: str) -> str:
+        """Generate hash of screenshot for caching."""
         with open(screenshot_path, 'rb') as f:
             return hashlib.md5(f.read()).hexdigest()
 
@@ -311,20 +386,34 @@ class LocalActionHeuristics:
     CONFIDENCE_THRESHOLD = 0.75
     
     def can_handle_locally(self, intent: str, vision_state: VisionState) -> bool:
+        """
+        Determine if intent can be handled with local heuristics.
+        
+        Args:
+            intent: User's intended action
+            vision_state: Current page vision state
+            
+        Returns:
+            True if can handle locally, False if needs cloud planning
+        """
+        # Parse intent to extract action type
         action_type = self._extract_action_type(intent)
         
         if action_type not in self.SIMPLE_ACTIONS:
             return False
         
+        # For simple actions, check if we have unambiguous target
         if action_type in ['click', 'type']:
             return self._has_unambiguous_target(intent, vision_state)
         
+        # Scroll and navigate are usually safe to handle locally
         if action_type in ['scroll', 'navigate', 'wait']:
             return True
             
         return False
     
     def _extract_action_type(self, intent: str) -> str:
+        """Extract primary action type from intent description."""
         intent_lower = intent.lower()
         
         if any(word in intent_lower for word in ['click', 'press', 'select', 'choose']):
@@ -341,14 +430,18 @@ class LocalActionHeuristics:
             return 'unknown'
     
     def _has_unambiguous_target(self, intent: str, vision_state: VisionState) -> bool:
+        """Check if intent has single high-confidence target in vision state."""
+        # Look for text mentions in intent
         intent_words = set(intent.lower().split())
+        
+        # Check elements and affordances for matches
         candidates = []
         
         for element in vision_state.elements:
             if element.confidence < self.CONFIDENCE_THRESHOLD:
                 continue
             element_words = set(element.visible_text.lower().split())
-            if intent_words & element_words:
+            if intent_words & element_words:  # Word overlap
                 candidates.append(element)
         
         for affordance in vision_state.affordances:
@@ -356,49 +449,73 @@ class LocalActionHeuristics:
             if intent_words & affordance_words:
                 candidates.append(affordance)
         
+        # Return True only if exactly one high-confidence match
         return len(candidates) == 1
+    
+    def _extract_action_type(self, intent: str) -> str:
+        """Extract action type from intent string."""
+        intent_lower = intent.lower()
+        
+        # Check for click-related keywords
+        if any(keyword in intent_lower for keyword in ['click', 'press', 'tap', 'select', 'choose']):
+            return 'click'
+        
+        # Check for type-related keywords
+        if any(keyword in intent_lower for keyword in ['type', 'enter', 'fill', 'input', 'write']):
+            return 'type'
+        
+        # Check for scroll-related keywords
+        if any(keyword in intent_lower for keyword in ['scroll', 'page down', 'page up']):
+            return 'scroll'
+        
+        # Check for navigation-related keywords
+        if any(keyword in intent_lower for keyword in ['go to', 'navigate', 'visit', 'open']):
+            return 'navigate'
+        
+        # Check for wait-related keywords
+        if any(keyword in intent_lower for keyword in ['wait', 'pause', 'delay']):
+            return 'wait'
+        
+        # Default to click for ambiguous cases
+        return 'click'
 
 # ----------------------------
 # Cloud Planner Client
 # ----------------------------
 
 class CloudPlannerClient:
-    """Client for cloud-based planning using OpenAI."""
+    """Client for cloud-based planning using Gemini 2.0 Flash."""
     
-    def __init__(self, model_name: str = "gpt-4o-mini"):
+    def __init__(self, model_name: str = "gemini-2.0-flash-exp"):
+        """Initialize cloud planner client."""
         self.model_name = model_name
-        self.llm = ChatOpenAI(model=model_name)
+        self.llm = ChatGoogle(model=model_name)
     
     async def get_plan(self, request: PlannerRequest) -> PlannerResponse:
+        """
+        Get action plan from cloud planner.
+        
+        Args:
+            request: Planner request with task, history, and vision state
+            
+        Returns:
+            PlannerResponse with action plan
+        """
         try:
+            # Build structured prompt
             prompt = self._build_planner_prompt(request)
             
-            # Use regular generation
-            response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
+            # Call cloud model with structured output
+            response = await self.llm.structured_output(
+                messages=[{"role": "user", "content": prompt}],
+                output_format=PlannerResponse
+            )
             
-            # Parse the response
-            response_text = response.completion.strip()
-            
-            # Try to extract JSON from response
-            if response_text.startswith('```'):
-                import re
-                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-                if json_match:
-                    response_text = json_match.group(1)
-            
-            try:
-                response_data = json.loads(response_text)
-                return PlannerResponse(**response_data)
-            except:
-                # Fallback response
-                return PlannerResponse(
-                    plan=[],
-                    reasoning_summary="Failed to parse planner response",
-                    needs_more_context=True
-                )
+            return response
             
         except Exception as e:
             print(f"Cloud planning failed: {e}")
+            # Return fallback plan
             return PlannerResponse(
                 plan=[],
                 reasoning_summary=f"Planning failed: {str(e)}",
@@ -406,44 +523,51 @@ class CloudPlannerClient:
             )
     
     def _build_planner_prompt(self, request: PlannerRequest) -> str:
-        prompt = f"""You are a web automation planner. Create an action plan to complete the task.
+        """Build prompt for cloud planner."""
+        prompt = f"""You are a web automation planner. Analyze the current page state and create a detailed action plan.
 
 TASK: {request.task}
 
-CURRENT PAGE:
+CURRENT PAGE STATE:
 URL: {request.vision.meta.url}
+Title: {request.vision.meta.title}
 Description: {request.vision.caption}
 
 AVAILABLE ELEMENTS:
 """
         
-        for i, elem in enumerate(request.vision.elements[:10], 1):
-            prompt += f"- {elem.role}: '{elem.visible_text}'\n"
+        # Add elements information
+        for i, elem in enumerate(request.vision.elements[:10]):  # Limit to avoid token overflow
+            prompt += f"- {elem.role}: '{elem.visible_text}' (selector: {elem.selector_hint})\n"
         
+        # Add affordances
+        if request.vision.affordances:
+            prompt += "\nINTERACTIVE ELEMENTS:\n"
+            for afford in request.vision.affordances[:10]:
+                prompt += f"- {afford.type}: '{afford.label}' (selector: {afford.selector_hint})\n"
+        
+        # Add form fields
+        if request.vision.fields:
+            prompt += "\nFORM FIELDS:\n"
+            for field in request.vision.fields[:10]:
+                prompt += f"- {field.name_hint}: current='{field.value_hint}' (editable: {field.editable})\n"
+        
+        # Add history context
         if request.history:
             prompt += f"\nRECENT HISTORY:\n"
-            for step in request.history[-5:]:
-                prompt += f"- {step.action} → {step.result}\n"
+            for step in request.history[-5:]:  # Last 5 steps
+                prompt += f"- {step.action} → {step.result}: {step.summary}\n"
         
         prompt += f"""
-GUIDANCE:
-- After search, prefer clicking relevant results to get actual content
-- Avoid finalizing with google.com/search URLs - click through to actual sites
-- When on search results, look for product pages, official sites, or detailed content
-- For price/product information, navigate to retailer sites (kroger.com, etc.)
+CONSTRAINTS: {request.constraints}
 
-Current URL context: {request.vision.meta.url}
-If currently on Google/search results, prioritize clicking relevant links.
+Create a plan with 3-5 specific actions. Each action should:
+1. Be immediately executable 
+2. Have clear target selectors
+3. Move toward the goal
+4. Handle likely failure cases
 
-Return a simple task to navigate or search for the information requested.
-Keep it focused on finding the specific information the user wants.
-
-Response format (JSON):
-{{
-  "plan": [],
-  "reasoning_summary": "Navigate to [site] and search for [query]",
-  "needs_more_context": false
-}}"""
+Return as structured JSON following the PlannerResponse schema."""
         
         return prompt
 
@@ -452,28 +576,55 @@ Response format (JSON):
 # ----------------------------
 
 class HandoffManager:
-    """Manages routing between local and cloud execution."""
+    """Manages routing between local and cloud execution with failure handling."""
     
     def __init__(self, confidence_threshold: float = 0.75, failure_threshold: int = 2):
+        """
+        Initialize handoff manager.
+        
+        Args:
+            confidence_threshold: Minimum confidence for local execution
+            failure_threshold: Consecutive failures before cloud escalation
+        """
         self.confidence_threshold = confidence_threshold
         self.failure_threshold = failure_threshold
         self.consecutive_local_failures = 0
         self.history: List[HistoryStep] = []
     
     def should_use_local(self, intent: str, vision_state: VisionState, local_heuristics: LocalActionHeuristics) -> bool:
+        """
+        Determine if intent should be handled locally or escalated to cloud.
+        
+        Args:
+            intent: User's intended action
+            vision_state: Current page vision state
+            local_heuristics: Local action decision engine
+            
+        Returns:
+            True if should handle locally, False if should use cloud
+        """
+        # Force cloud escalation after repeated local failures
         if self.consecutive_local_failures >= self.failure_threshold:
             return False
         
+        # Check if vision state has low confidence elements
         if vision_state.elements:
             avg_confidence = sum(elem.confidence for elem in vision_state.elements) / len(vision_state.elements)
             if avg_confidence < self.confidence_threshold:
                 return False
         
+        # Use local heuristics to determine capability
         return local_heuristics.can_handle_locally(intent, vision_state)
     
     def record_local_result(self, action: str, success: bool, summary: str):
+        """Record result of local action execution."""
         result = "ok" if success else "fail"
-        self.history.append(HistoryStep(action=action, result=result, summary=summary))
+        
+        self.history.append(HistoryStep(
+            action=action,
+            result=result, 
+            summary=summary
+        ))
         
         if success:
             self.consecutive_local_failures = 0
@@ -481,82 +632,67 @@ class HandoffManager:
             self.consecutive_local_failures += 1
     
     def record_cloud_result(self, action: str, success: bool, summary: str):
+        """Record result of cloud action execution."""
         result = "ok" if success else "fail"
-        self.history.append(HistoryStep(action=action, result=result, summary=summary))
+        
+        self.history.append(HistoryStep(
+            action=action,
+            result=result,
+            summary=summary
+        ))
+        
+        # Reset local failure count after cloud execution
         self.consecutive_local_failures = 0
     
     def get_recent_history(self, max_steps: int = 5) -> List[HistoryStep]:
+        """Get recent execution history for context."""
         return self.history[-max_steps:] if self.history else []
-
-# ----------------------------
-# Custom Action for Vision Analysis
-# ----------------------------
-
-async def register_vision_action(controller: Controller, vision_builder: VisionStateBuilder, screenshots_dir: Path):
-    """Register custom action for vision analysis."""
     
-    @controller.action("Analyze current page with local vision")
-    async def analyze_page_vision(browser_session: BrowserSession) -> ActionResult:
-        """Take screenshot and analyze with local VLM. No-fail implementation."""
-        try:
-            state = await browser_session.get_browser_state_summary()
-            screenshot_path = await browser_session.take_screenshot()
-            vision_state = await vision_builder.build_vision_state(
-                str(screenshot_path), state.url or "", state.title or ""
-            )
-            summary = (
-                f"{vision_state.caption}\n"
-                f"elements: {len(vision_state.elements)}, "
-                f"fields: {len(vision_state.fields)}, "
-                f"affordances: {len(vision_state.affordances)}; "
-                f"url: {state.url}; title: {state.title}"
-            )
-            return ActionResult(extracted_content=summary, include_in_memory=True)
-        except Exception as e:
-            # No-fail: return best-effort payload even on error
-            try:
-                state = await browser_session.get_browser_state_summary()
-                url = state.url or "unknown"
-                title = state.title or "unknown"
-            except:
-                url = "unknown"
-                title = "unknown"
+    def classify_failure(self, error_message: str) -> str:
+        """
+        Classify failure type for appropriate escalation strategy.
+        
+        Args:
+            error_message: Error message from failed action
             
-            best_effort_summary = (
-                f"Vision analysis unavailable (error: {str(e)[:50]})\n"
-                f"elements: 0, fields: 0, affordances: 0; "
-                f"url: {url}; title: {title}"
-            )
-            print(f"⚠️ Vision analysis failed but continuing: {e}")
-            return ActionResult(extracted_content=best_effort_summary, include_in_memory=True)
+        Returns:
+            Failure classification string
+        """
+        error_lower = error_message.lower()
+        
+        if any(keyword in error_lower for keyword in ['not found', 'no such element', 'selector']):
+            return "element_not_found"
+        elif any(keyword in error_lower for keyword in ['timeout', 'load']):
+            return "page_load_timeout" 
+        elif any(keyword in error_lower for keyword in ['click', 'interaction', 'element not clickable']):
+            return "interaction_failed"
+        elif any(keyword in error_lower for keyword in ['navigation', 'unexpected page', 'wrong page']):
+            return "unexpected_page"
+        else:
+            return "unknown_error"
     
-    print("✅ Registered custom action: analyze_page_vision")
-
-async def register_serper_action(controller: Controller):
-    """Register Serper search actions."""
-    
-    @controller.action("search_web")
-    async def search_web_action(query: str, num_results: int = 10) -> str:
-        """Search the web using Serper API with browser fallback."""
-        result = await search_with_serper_fallback(controller, query, num_results)
-        return result.extracted_content
-    
-    @controller.action("search_google")
-    async def search_google_action(query: str, num_results: int = 10) -> str:
-        """Search Google using Serper API with browser fallback."""
-        result = await search_with_serper_fallback(controller, query, num_results)
-        return result.extracted_content
-    
-    print("✅ Registered custom actions: search_web, search_google")
+    def should_escalate_immediately(self, failure_type: str) -> bool:
+        """Determine if failure type requires immediate cloud escalation."""
+        immediate_escalation_types = {
+            "element_not_found",
+            "unexpected_page"
+        }
+        return failure_type in immediate_escalation_types
 
 # ----------------------------
 # Hybrid Agent Main Class
 # ----------------------------
 
 class HybridAgent:
-    """Main hybrid agent using Browser-Use 0.6.x API correctly."""
+    """Main hybrid agent combining local vision with cloud planning."""
     
-    def __init__(self, screenshots_dir: str = "browser_queries/screenshots", user_data_dir: Optional[str] = None):
+    def __init__(self,
+                 screenshots_dir: str = "browser_queries/screenshots",
+                 vision_cache_size: int = 100,
+                 confidence_threshold: float = 0.75,
+                 failure_threshold: int = 2,
+                 user_data_dir: Optional[str] = None):
+        """Initialize hybrid agent."""
         self.screenshots_dir = Path(screenshots_dir)
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
         
@@ -564,7 +700,7 @@ class HybridAgent:
         self.vision_builder = VisionStateBuilder()
         self.local_heuristics = LocalActionHeuristics()
         self.cloud_planner = CloudPlannerClient()
-        self.handoff_manager = HandoffManager()
+        self.handoff_manager = HandoffManager(confidence_threshold, failure_threshold)
         
         # State tracking
         self.current_vision_state: Optional[VisionState] = None
@@ -576,139 +712,547 @@ class HybridAgent:
         self.user_data_dir = Path(user_data_dir)
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         
-        # Browser-Use components (will be initialized on first use)
+        # Browser session (will be initialized on first use)
         self.browser_session: Optional[BrowserSession] = None
         self.agent: Optional[Agent] = None
     
     async def execute_task(self, task: str) -> Dict[str, Any]:
-        """Execute a task using hybrid approach with Browser-Use 0.6.x."""
+        """
+        Execute a task using hybrid local-vision + cloud-reasoning approach.
+        
+        Args:
+            task: Task description from user
+            
+        Returns:
+            Execution result summary
+        """
         print(f"🤖 Starting hybrid task: {task}")
         
-        # Initialize browser session if needed
+        # Initialize browser if needed
         if not self.browser_session:
             await self._initialize_browser()
         
-        # Create task description that incorporates vision analysis
-        enhanced_task = self._create_enhanced_task(task)
+        # Main execution loop
+        max_iterations = 20
+        iteration = 0
         
-        # Create controller and register custom actions
-        controller = Controller()
-        await register_vision_action(controller, self.vision_builder, self.screenshots_dir)
-        await register_serper_action(controller)
+        while iteration < max_iterations:
+            iteration += 1
+            print(f"\n--- Iteration {iteration} ---")
+            
+            try:
+                # Step 1: Capture current state
+                vision_state = await self._capture_vision_state()
+                self.current_vision_state = vision_state
+                
+                print(f"📸 Vision: {vision_state.caption}")
+                print(f"🎯 Elements: {len(vision_state.elements)}, Fields: {len(vision_state.fields)}, Affordances: {len(vision_state.affordances)}")
+                
+                # Step 2: Determine if task is complete
+                if await self._is_task_complete(task, vision_state):
+                    print("✅ Task completed successfully!")
+                    break
+                
+                # Step 3: Decide on next action approach using HandoffManager
+                if self.handoff_manager.should_use_local(task, vision_state, self.local_heuristics):
+                    print("🔧 Handling locally...")
+                    success = await self._execute_local_action(task, vision_state)
+                else:
+                    print("☁️ Escalating to cloud planner...")  
+                    success = await self._execute_cloud_plan(task, vision_state)
+                
+                # Step 4: Update history and handle failures
+                if success:
+                    self.consecutive_failures = 0
+                else:
+                    self.consecutive_failures += 1
+                    if self.consecutive_failures >= 3:
+                        print("❌ Too many consecutive failures, stopping")
+                        break
+                
+                # Brief pause between iterations
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                print(f"❌ Iteration {iteration} failed: {e}")
+                self.consecutive_failures += 1
+                if self.consecutive_failures >= 3:
+                    break
         
-        # Create agent with the task
-        self.agent = Agent(
-            task=enhanced_task,
-            llm=self.cloud_planner.llm,
-            controller=controller,
-            browser_session=self.browser_session,
-            use_vision=True,  # Enable vision for Browser-Use
-            save_conversation_path=str(self.screenshots_dir / "conversations"),
-        )
-        
-        # Run the agent
-        try:
-            print("🚀 Running Browser-Use agent with hybrid enhancements...")
-            history = await self.agent.run(max_steps=15)
-            
-            # Extract results using AgentHistoryList helpers
-            success = history.is_done() and not history.has_errors()
-            final_url = (history.urls() or [None])[-1]
-            
-            # Capture screenshot on completion for finalization guardrails
-            screenshot_path = None
-            if success and self.browser_session:
-                try:
-                    screenshot_path = await self.browser_session.take_screenshot()
-                    print(f"📸 Final screenshot saved: {screenshot_path}")
-                except Exception as e:
-                    print(f"⚠️ Failed to capture final screenshot: {e}")
-            
-            return {
-                "task": task,
-                "completed": success,
-                "iterations": len(history),
-                "history_length": len(history),
-                "final_url": final_url,
-                "final_screenshot": str(screenshot_path) if screenshot_path else None
-            }
-            
-        except Exception as e:
-            print(f"❌ Agent execution failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                "task": task,
-                "completed": False,
-                "iterations": 0,
-                "history_length": 0,
-                "error": str(e)
-            }
+        # Return execution summary
+        return {
+            "task": task,
+            "completed": iteration < max_iterations and self.consecutive_failures < 3,
+            "iterations": iteration,
+            "history_length": len(self.handoff_manager.history),
+            "final_url": self.current_vision_state.meta.url if self.current_vision_state else None
+        }
     
     async def _initialize_browser(self):
-        """Initialize browser session using Browser-Use 0.6.x API."""
+        """Initialize browser session and agent."""
         print("🌐 Initializing browser session...")
         
-        # Create browser profile
+        # Ensure the user data directory exists
+        self.user_data_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create browser profile with explicit user_data_dir passed during creation
         browser_profile = BrowserProfile(
             user_data_dir=str(self.user_data_dir),
-            headless=False,
-            keep_alive=True,
-            stealth=False,  # Disable stealth to avoid issues
-            enable_default_extensions=False,  # Disable to silence CRX warnings
-            wait_for_network_idle_page_load_time=3.0,
-            minimum_wait_page_load_time=0.5,
-            maximum_wait_page_load_time=8.0,
-            wait_between_actions=0.7,
-            default_timeout=10_000,
-            default_navigation_timeout=45_000,
+            headless=False,  # Set to True if you want headless mode
+            stealth=False  # Disable stealth to avoid potential issues
         )
         
         print(f"🗂️ Using user_data_dir: {browser_profile.user_data_dir}")
         
-        # Create browser session
+        # Create browser session with the profile
         self.browser_session = BrowserSession(browser_profile=browser_profile)
         
-        print("✅ Browser session initialized")
+        # Create a temporary agent to get access to the controller
+        # We'll use this for direct browser operations
+        self.agent = Agent(
+            task="hybrid agent browser control",
+            llm=self.cloud_planner.llm,
+            browser_session=self.browser_session
+        )
+        
+        print("✅ Browser initialized")
     
-    def _create_enhanced_task(self, task: str) -> str:
-        """Create enhanced task description for the agent."""
+    async def _capture_vision_state(self) -> VisionState:
+        """Capture and analyze current page state."""
+        if not self.browser_session:
+            raise RuntimeError("Browser not initialized")
         
-        # Determine task type and enhance accordingly
-        task_lower = task.lower()
+        # Get browser state summary which includes screenshot
+        browser_state_summary = await self.browser_session.get_browser_state_summary(include_screenshot=True)
         
-        if 'weather' in task_lower:
-            # Extract location
-            import re
-            zip_match = re.search(r'\b\d{5}\b', task)
-            location = zip_match.group() if zip_match else task.replace('check weather', '').strip()
-            
-            return f"""Navigate to Google and search for weather in {location}.
-Find and report the current temperature, conditions, and forecast.
-Use the custom action 'analyze_page_vision' periodically to understand page content.
-"""
+        # Get page metadata from browser state
+        page_url = browser_state_summary.url
+        page_title = browser_state_summary.title
         
-        elif any(word in task_lower for word in ['search', 'find', 'look up']):
-            return f"""Use the custom action 'search_web' to search for: {task}
-Alternatively, navigate to Google and perform the search.
-Report the top results found.
-Use 'analyze_page_vision' to understand search results.
-"""
+        # Save screenshot if available
+        timestamp = datetime.now().strftime("%H%M%S")
+        screenshot_path = self.screenshots_dir / f"vision_{timestamp}.png"
         
+        if browser_state_summary.screenshot:
+            # Decode base64 screenshot and save
+            import base64
+            screenshot_data = base64.b64decode(browser_state_summary.screenshot)
+            with open(screenshot_path, 'wb') as f:
+                f.write(screenshot_data)
         else:
-            return f"""{task}
-Use the custom action 'analyze_page_vision' periodically to understand page content.
-This will help you navigate and interact with the page more effectively.
-"""
+            raise RuntimeError("No screenshot available from browser state")
+        
+        # Build vision state
+        vision_state = await self.vision_builder.build_vision_state(
+            str(screenshot_path), page_url, page_title
+        )
+        
+        return vision_state
+    
+    async def _is_task_complete(self, task: str, vision_state: VisionState) -> bool:
+        """Determine if task has been completed."""
+        # For now, implement basic heuristics
+        # In a full implementation, this could use the cloud model for completion detection
+        
+        # Check for success indicators in page content
+        success_indicators = ['success', 'complete', 'done', 'thank you', 'confirmation']
+        page_text = vision_state.caption.lower()
+        
+        return any(indicator in page_text for indicator in success_indicators)
+    
+    async def _execute_local_action(self, task: str, vision_state: VisionState) -> bool:
+        """Execute simple action using local heuristics."""
+        try:
+            # Extract action type and target from task
+            action_type = self.local_heuristics._extract_action_type(task)
+            
+            if action_type == 'click':
+                return await self._execute_local_click(task, vision_state)
+            elif action_type == 'type':
+                return await self._execute_local_type(task, vision_state)
+            elif action_type == 'scroll':
+                return await self._execute_local_scroll(task, vision_state)
+            elif action_type == 'navigate':
+                return await self._execute_local_navigate(task, vision_state)
+            elif action_type == 'wait':
+                await asyncio.sleep(2)  # Simple wait
+                self.handoff_manager.record_local_result(
+                    action="wait_executed",
+                    success=True,
+                    summary="Waited 2 seconds"
+                )
+                return True
+            else:
+                print(f"❌ Unknown local action type: {action_type}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Local action failed: {e}")
+            action_type = self.local_heuristics._extract_action_type(task)
+            self.handoff_manager.record_local_result(
+                action=f"local_{action_type}_failed",
+                success=False,
+                summary=f"Local action failed: {str(e)}"
+            )
+            return False
+    
+    async def _execute_local_click(self, task: str, vision_state: VisionState) -> bool:
+        """Execute click action locally."""
+        # Find best target from vision state
+        target = self._find_click_target(task, vision_state)
+        if not target:
+            return False
+        
+        try:
+            # Try different click strategies
+            success = False
+            
+            # Strategy 1: Use selector hint if available
+            if hasattr(target, 'selector_hint') and target.selector_hint:
+                # Temporarily disable direct page access
+                print(f"🔄 Selector click deferred: {target.selector_hint}")
+                pass
+            
+            # Strategy 2: Click by coordinates if selector failed - temporarily disabled
+            if not success and hasattr(target, 'bbox'):
+                print(f"🔄 Coordinate click deferred: {target.bbox}")
+                pass
+            
+            # Strategy 3: Try JavaScript click - temporarily disabled
+            if not success and hasattr(target, 'selector_hint'):
+                print(f"🔄 JS click deferred: {target.selector_hint}")
+                pass
+            
+            # Update history via HandoffManager
+            action_desc = f"click_{getattr(target, 'visible_text', getattr(target, 'label', 'element'))}"
+            self.handoff_manager.record_local_result(
+                action=action_desc,
+                success=success,
+                summary=f"Click on {getattr(target, 'visible_text', getattr(target, 'label', 'element'))}"
+            )
+            
+            return success
+            
+        except Exception as e:
+            print(f"❌ Click execution failed: {e}")
+            return False
+    
+    async def _execute_local_type(self, task: str, vision_state: VisionState) -> bool:
+        """Execute type action locally."""
+        # Extract text to type and find target field
+        target, text_to_type = self._find_type_target(task, vision_state)
+        if not target or not text_to_type:
+            return False
+        
+        try:
+            # Find the input field and type text
+            success = False
+            
+            # Defer typing to cloud planner for better accuracy
+            print(f"🔄 Type action deferred to cloud planner: '{text_to_type}'")
+            success = False
+            
+            # Update history via HandoffManager
+            self.handoff_manager.record_local_result(
+                action=f"type_{target.name_hint}",
+                success=success,
+                summary=f"Typed '{text_to_type}' in {target.name_hint}"
+            )
+            
+            return success
+            
+        except Exception as e:
+            print(f"❌ Type execution failed: {e}")
+            return False
+    
+    async def _execute_local_scroll(self, task: str, vision_state: VisionState) -> bool:
+        """Execute scroll action locally."""
+        # Defer scrolling to cloud planner for consistency
+        print(f"🔄 Scroll action deferred to cloud planner")
+        return False
+    
+    async def _execute_local_navigate(self, task: str, vision_state: VisionState) -> bool:
+        """Execute navigation action locally."""
+        # Defer navigation to cloud planner for consistency
+        print(f"🔄 Navigation action deferred to cloud planner")
+        return False
+    
+    def _find_click_target(self, task: str, vision_state: VisionState):
+        """Find best click target from vision state."""
+        task_words = set(task.lower().split())
+        
+        # Check affordances first (buttons, links, etc.)
+        for affordance in vision_state.affordances:
+            affordance_words = set(affordance.label.lower().split())
+            if task_words & affordance_words:  # Word overlap
+                return affordance
+        
+        # Check elements as fallback
+        for element in vision_state.elements:
+            if element.confidence < self.local_heuristics.CONFIDENCE_THRESHOLD:
+                continue
+            element_words = set(element.visible_text.lower().split())
+            if task_words & element_words:
+                return element
+        
+        return None
+    
+    def _find_type_target(self, task: str, vision_state: VisionState):
+        """Find type target and extract text to type."""
+        # Simple extraction - look for quoted text or after "type" keyword
+        text_to_type = None
+        
+        # Look for quoted strings
+        import re
+        quotes = re.findall(r'"([^"]*)"', task) or re.findall(r"'([^']*)'", task)
+        if quotes:
+            text_to_type = quotes[0]
+        else:
+            # Look for text after "type" keyword
+            words = task.split()
+            type_idx = -1
+            for i, word in enumerate(words):
+                if word.lower() in ['type', 'enter', 'input', 'fill']:
+                    type_idx = i
+                    break
+            if type_idx != -1 and type_idx + 1 < len(words):
+                text_to_type = ' '.join(words[type_idx + 1:])
+        
+        if not text_to_type:
+            return None, None
+        
+        # Find best field target
+        task_words = set(task.lower().split())
+        
+        for field in vision_state.fields:
+            if not field.editable:
+                continue
+            field_words = set(field.name_hint.lower().split())
+            if task_words & field_words:  # Word overlap
+                return field, text_to_type
+        
+        # Return first editable field as fallback
+        for field in vision_state.fields:
+            if field.editable:
+                return field, text_to_type
+        
+        return None, None
+    
+    def _extract_url_from_task(self, task: str) -> Optional[str]:
+        """Extract URL from navigation task."""
+        import re
+        
+        # Look for URLs in the task
+        url_pattern = r'https?://[^\s]+'
+        urls = re.findall(url_pattern, task)
+        if urls:
+            return urls[0]
+        
+        # Look for common domain patterns
+        domain_pattern = r'(?:go to|visit|navigate to)\s+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+        domains = re.findall(domain_pattern, task, re.IGNORECASE)
+        if domains:
+            domain = domains[0]
+            if not domain.startswith('http'):
+                return f'https://{domain}'
+            return domain
+        
+        return None
+    
+    async def _execute_cloud_plan(self, task: str, vision_state: VisionState) -> bool:
+        """Execute action plan from cloud planner."""
+        # Build planner request
+        request = PlannerRequest(
+            task=task,
+            history=self.handoff_manager.get_recent_history(5),  # Last 5 steps for context
+            vision=vision_state,
+            constraints={"max_actions": 5}
+        )
+        
+        # Get plan from cloud
+        response = await self.cloud_planner.get_plan(request)
+        
+        print(f"📋 Cloud plan: {len(response.plan)} actions")
+        print(f"🧠 Reasoning: {response.reasoning_summary}")
+        
+        if response.needs_more_context:
+            print("⚠️ Cloud planner needs more context")
+            return False
+        
+        # Execute plan actions sequentially
+        success_count = 0
+        for i, action in enumerate(response.plan):
+            print(f"  Action {i+1}: {action.op} on {action.target}")
+            
+            try:
+                success = await self._execute_single_action(action)
+                if success:
+                    success_count += 1
+                    print(f"    ✅ Action {i+1} completed")
+                else:
+                    print(f"    ❌ Action {i+1} failed")
+                    # Continue with remaining actions even if one fails
+                
+                # Brief pause between actions
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                print(f"    ❌ Action {i+1} error: {e}")
+                # Continue with remaining actions
+        
+        # Update history via HandoffManager
+        self.handoff_manager.record_cloud_result(
+            action=f"cloud_plan_executed",
+            success=success_count > 0,
+            summary=f"Executed {success_count}/{len(response.plan)} actions from cloud plan"
+        )
+        
+        return success_count > 0
+    
+    async def _execute_single_action(self, action: Action) -> bool:
+        """Execute a single action from cloud plan."""
+        try:
+            if action.op == 'click':
+                return await self._execute_action_click(action)
+            elif action.op == 'type':
+                return await self._execute_action_type(action)
+            elif action.op == 'scroll':
+                return await self._execute_action_scroll(action)
+            elif action.op == 'navigate':
+                return await self._execute_action_navigate(action)
+            elif action.op == 'wait':
+                wait_time = float(action.value) if action.value else 2.0
+                await asyncio.sleep(wait_time)
+                return True
+            elif action.op == 'select':
+                return await self._execute_action_select(action)
+            elif action.op == 'hover':
+                return await self._execute_action_hover(action)
+            else:
+                print(f"❌ Unknown action type: {action.op}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Action execution failed: {e}")
+            return False
+    
+    async def _execute_action_click(self, action: Action) -> bool:
+        """Execute click action from cloud plan."""
+        try:
+            selector_hint = action.target.get('selector_hint')
+            text_hint = action.target.get('text')
+            
+            if selector_hint:
+                # Temporarily disable direct page access
+                print(f"⚠️ Click action needs proper controller implementation")
+                return False
+            
+            # If selector failed, try text-based selection
+            if text_hint:
+                print(f"⚠️ Text-based click needs proper controller implementation")
+                return False
+            
+            return False
+            
+        except Exception as e:
+            print(f"❌ Click action failed: {e}")
+            return False
+    
+    async def _execute_action_type(self, action: Action) -> bool:
+        """Execute type action from cloud plan."""
+        try:
+            selector_hint = action.target.get('selector_hint')
+            value = action.value or ""
+            
+            if selector_hint:
+                print(f"⚠️ Type action needs proper controller implementation")
+                return False
+            
+            return False
+            
+        except Exception as e:
+            print(f"❌ Type action failed: {e}")
+            return False
+    
+    async def _execute_action_scroll(self, action: Action) -> bool:
+        """Execute scroll action from cloud plan."""
+        try:
+            # Parse scroll direction and amount from value or notes
+            direction = "down"  # default
+            amount = 400  # default pixels
+            
+            if action.value:
+                if "up" in action.value.lower():
+                    direction = "up"
+                    amount = -400
+                elif "down" in action.value.lower():
+                    direction = "down"
+                    amount = 400
+            
+            # Execute scroll - temporarily disabled
+            print(f"⚠️ Scroll action needs proper controller implementation")
+            return False
+            
+        except Exception as e:
+            print(f"❌ Scroll action failed: {e}")
+            return False
+    
+    async def _execute_action_navigate(self, action: Action) -> bool:
+        """Execute navigate action from cloud plan."""
+        try:
+            url = action.value
+            if not url:
+                return False
+            
+            # Add protocol if missing
+            if not url.startswith(('http://', 'https://')):
+                url = f'https://{url}'
+            
+            print(f"⚠️ Navigate action needs proper controller implementation")
+            return False
+            
+        except Exception as e:
+            print(f"❌ Navigate action failed: {e}")
+            return False
+    
+    async def _execute_action_select(self, action: Action) -> bool:
+        """Execute select action from cloud plan."""
+        try:
+            selector_hint = action.target.get('selector_hint')
+            value = action.value
+            
+            if selector_hint and value:
+                print(f"⚠️ Select action needs proper controller implementation")
+                return False
+            
+            return False
+            
+        except Exception as e:
+            print(f"❌ Select action failed: {e}")
+            return False
+    
+    async def _execute_action_hover(self, action: Action) -> bool:
+        """Execute hover action from cloud plan."""
+        try:
+            selector_hint = action.target.get('selector_hint')
+            
+            if selector_hint:
+                print(f"⚠️ Hover action needs proper controller implementation")
+                return False
+            
+            return False
+            
+        except Exception as e:
+            print(f"❌ Hover action failed: {e}")
+            return False
 
 # ----------------------------
-# CLI Interface
+# CLI Interface (from agent.py)  
 # ----------------------------
 
 async def main():
     """Main CLI interface."""
     print("🤖 Hybrid Local-Vision + Cloud-Reasoning Agent")
-    print("📦 Using Browser-Use 0.6.x with modern API")
     print("=" * 50)
     
     agent = HybridAgent()
@@ -733,12 +1277,8 @@ async def main():
             print(f"Completed: {'✅' if result['completed'] else '❌'}")
             print(f"Iterations: {result['iterations']}")
             print(f"History steps: {result['history_length']}")
-            if result.get('final_url'):
+            if result['final_url']:
                 print(f"Final URL: {result['final_url']}")
-            if result.get('final_screenshot'):
-                print(f"Final screenshot: {result['final_screenshot']}")
-            if result.get('error'):
-                print(f"Error: {result['error']}")
             print("=" * 50)
             
         except KeyboardInterrupt:
@@ -746,8 +1286,6 @@ async def main():
             break
         except Exception as e:
             print(f"❌ Error: {e}")
-            import traceback
-            traceback.print_exc()
 
 if __name__ == "__main__":
     asyncio.run(main())
