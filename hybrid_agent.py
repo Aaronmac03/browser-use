@@ -49,7 +49,7 @@ async def resolve_minicpm_tag(endpoint: str = "http://localhost:11434") -> str:
     except Exception:
         return "minicpm-v"  # Default fallback
 
-from browser_use import Agent, BrowserSession, Controller, BrowserProfile
+from browser_use import Agent, BrowserSession, Controller
 from browser_use.llm import ChatGoogle
 
 # Import existing functionality from agent.py
