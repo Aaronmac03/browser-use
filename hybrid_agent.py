@@ -29,14 +29,10 @@ load_dotenv(override=True)
 # Browser-Use 0.6.x imports
 from browser_use import Agent, Controller, ActionResult
 from browser_use.browser import BrowserProfile, BrowserSession
-from browser_use.browser.events import ScreenshotEvent
 from browser_use.llm import ChatGoogle, ChatOpenAI
 
 # Import serper search functionality
 from serper_search import search_with_serper_fallback
-
-# Import working vision module from Phase 1
-from vision_module import VisionAnalyzer, VisionState, VisionElement, VisionField, VisionAffordance, VisionMeta
 
 # ----------------------------
 # Configuration
@@ -119,8 +115,46 @@ def save_query_log(query, result, cost_info=None):
     return log_file
 
 # ----------------------------
-# Data Schemas (VisionState imported from vision_module.py)
+# Data Schemas
 # ----------------------------
+
+class VisionElement(BaseModel):
+    """Individual UI element detected by vision system."""
+    role: str = Field(description="Element type: button|link|text|image|other")
+    visible_text: str = Field(description="Text content visible to user")
+    attributes: Dict[str, str] = Field(description="HTML attributes", default_factory=dict)
+    selector_hint: str = Field(description="CSS/XPath selector hint for targeting")
+    bbox: List[int] = Field(description="Bounding box [x,y,w,h]")
+    confidence: float = Field(description="Vision confidence score 0-1")
+
+class VisionField(BaseModel):
+    """Form field detected by vision system."""
+    name_hint: str = Field(description="Field name/label hint")
+    value_hint: str = Field(description="Current field value if visible")
+    bbox: List[int] = Field(description="Bounding box [x,y,w,h]")
+    editable: bool = Field(description="Whether field accepts input")
+
+class VisionAffordance(BaseModel):
+    """Interactive affordance detected by vision system."""
+    type: str = Field(description="Affordance type: button|link|tab|menu|icon")
+    label: str = Field(description="Human-readable label")
+    selector_hint: str = Field(description="CSS/XPath selector hint")
+    bbox: List[int] = Field(description="Bounding box [x,y,w,h]")
+
+class VisionMeta(BaseModel):
+    """Page metadata from vision analysis."""
+    url: str = Field(description="Current page URL")
+    title: str = Field(description="Page title")
+    scrollY: int = Field(description="Vertical scroll position")
+    timestamp: str = Field(description="ISO8601 timestamp of capture")
+
+class VisionState(BaseModel):
+    """Complete vision state of current page."""
+    caption: str = Field(description="Brief description of page content", max_length=200)
+    elements: List[VisionElement] = Field(description="UI elements detected")
+    fields: List[VisionField] = Field(description="Form fields detected")  
+    affordances: List[VisionAffordance] = Field(description="Interactive elements")
+    meta: VisionMeta = Field(description="Page metadata")
 
 class GenericAction(BaseModel):
     """Generic browser action using primitive operations."""
@@ -185,12 +219,181 @@ async def resolve_minicpm_tag(endpoint: str = "http://localhost:11434") -> str:
         return "minicpm-v"
 
 # ----------------------------
-# Vision State Builder - REPLACED
+# Vision State Builder
 # ----------------------------
 
-# ✅ PHASE 2.1 COMPLETE: VisionStateBuilder has been replaced with VisionAnalyzer
-# The working VisionAnalyzer from vision_module.py is now imported and used throughout
-# the codebase. This old VisionStateBuilder class is no longer needed.
+class VisionStateBuilder:
+    """Builds VisionState from screenshots using local MiniCPM-V 2.6."""
+    
+    def __init__(self, model_endpoint: str = "http://localhost:11434", model_name: Optional[str] = None):
+        self.model_endpoint = model_endpoint.rstrip('/')
+        self.model_name = model_name
+        self.client = httpx.AsyncClient(timeout=60.0)
+        self.vision_cache = {}
+        
+    async def build_vision_state(self, screenshot_path: str, page_url: str, page_title: str) -> VisionState:
+        """Build VisionState from screenshot using local VLM."""
+        # Check cache first
+        screenshot_hash = self._hash_screenshot(screenshot_path)
+        if screenshot_hash in self.vision_cache:
+            cached_state = self.vision_cache[screenshot_hash]
+            cached_state.meta.url = page_url
+            cached_state.meta.title = page_title
+            cached_state.meta.timestamp = datetime.now().isoformat()
+            return cached_state
+        
+        # Encode screenshot
+        with open(screenshot_path, 'rb') as f:
+            image_b64 = base64.b64encode(f.read()).decode('utf-8')
+        
+        prompt = self._build_vision_prompt()
+        
+        try:
+            response = await self._call_local_vlm(prompt, image_b64)
+            vision_data = self._parse_vision_response(response)
+            
+            vision_state = VisionState(
+                caption=vision_data.get('caption', 'UI screenshot'),
+                elements=[VisionElement(**elem) for elem in vision_data.get('elements', [])],
+                fields=[VisionField(**field) for field in vision_data.get('fields', [])],
+                affordances=[VisionAffordance(**afford) for afford in vision_data.get('affordances', [])],
+                meta=VisionMeta(
+                    url=page_url,
+                    title=page_title,
+                    scrollY=0,
+                    timestamp=datetime.now().isoformat()
+                )
+            )
+            
+            self.vision_cache[screenshot_hash] = vision_state
+            return vision_state
+            
+        except Exception as e:
+            print(f"⚠️ Vision analysis failed but continuing: {e}")
+            return self._fallback_vision_state(page_url, page_title)
+    
+    def _build_vision_prompt(self) -> str:
+        return """Analyze this screenshot and extract UI elements as JSON.
+
+Find buttons, links, input fields, text, and interactive elements. Return JSON only:
+
+{
+  "caption": "Brief description of the page",
+  "elements": [
+    {
+      "role": "button|link|text|input|other",
+      "visible_text": "text shown", 
+      "attributes": {},
+      "selector_hint": "element description",
+      "bbox": [0, 0, 0, 0],
+      "confidence": 0.8
+    }
+  ],
+  "fields": [
+    {
+      "name_hint": "field name",
+      "value_hint": "current value", 
+      "bbox": [0, 0, 0, 0],
+      "editable": true
+    }
+  ],
+  "affordances": [
+    {
+      "type": "button|link|tab|menu",
+      "label": "element label",
+      "selector_hint": "how to find it",
+      "bbox": [0, 0, 0, 0]
+    }
+  ]
+}"""
+
+    async def _call_local_vlm(self, prompt: str, image_b64: str) -> Dict[str, Any]:
+        if not self.model_name:
+            self.model_name = await resolve_minicpm_tag(self.model_endpoint)
+        
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "images": [image_b64],
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.1}
+        }
+        
+        response = await self.client.post(
+            f"{self.model_endpoint}/api/generate",
+            json=payload
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"HTTP {response.status_code}: {response.text}")
+        
+        return response.json()
+    
+    def _parse_vision_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            response_text = response.get('response', '{}')
+            
+            # Extract JSON
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}') + 1
+            
+            if start_idx != -1 and end_idx > start_idx:
+                json_text = response_text[start_idx:end_idx]
+            else:
+                json_text = response_text
+            
+            vision_data = json.loads(json_text)
+            
+            # Validate and set defaults
+            if not isinstance(vision_data, dict):
+                vision_data = {}
+                
+            vision_data.setdefault('elements', [])
+            vision_data.setdefault('fields', [])
+            vision_data.setdefault('affordances', [])
+            vision_data.setdefault('caption', 'UI screenshot analysis')
+            
+            # Validate elements
+            valid_elements = []
+            for elem in vision_data.get('elements', []):
+                if isinstance(elem, dict):
+                    elem.setdefault('role', 'other')
+                    elem.setdefault('visible_text', '')
+                    elem.setdefault('attributes', {})
+                    elem.setdefault('selector_hint', '')
+                    elem.setdefault('bbox', [0, 0, 0, 0])
+                    elem.setdefault('confidence', 0.5)
+                    valid_elements.append(elem)
+            vision_data['elements'] = valid_elements
+                
+            return vision_data
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            return {
+                'caption': 'Vision analysis parsing failed',
+                'elements': [],
+                'fields': [],
+                'affordances': []
+            }
+    
+    def _fallback_vision_state(self, page_url: str, page_title: str) -> VisionState:
+        return VisionState(
+            caption="Vision analysis unavailable",
+            elements=[],
+            fields=[],
+            affordances=[],
+            meta=VisionMeta(
+                url=page_url,
+                title=page_title,
+                scrollY=0,
+                timestamp=datetime.now().isoformat()
+            )
+        )
+    
+    def _hash_screenshot(self, screenshot_path: str) -> str:
+        with open(screenshot_path, 'rb') as f:
+            return hashlib.md5(f.read()).hexdigest()
 
 # ----------------------------
 # Search Client (Serper API)
@@ -222,25 +425,14 @@ class PlannerClient:
     def __init__(self):
         self.llm = ChatOpenAI(model=O3_PLANNER_MODEL)
     
-    async def create_plan(self, user_task: str) -> tuple[PlanJSON, Dict[str, Any]]:
-        """Create structured plan from user task (runs exactly once). Returns plan and usage info."""
+    async def create_plan(self, user_task: str) -> PlanJSON:
+        """Create structured plan from user task (runs exactly once)."""
         try:
             prompt = self._build_planner_prompt(user_task)
             
             print_status("Running o3 planner (one-shot)...", Colors.BLUE)
             response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
             response_text = response.completion.strip()
-            
-            # Capture actual usage information
-            usage_info = {
-                "model": self.llm.model,
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                "total_tokens": response.usage.total_tokens if response.usage else 0,
-                "cached_tokens": response.usage.prompt_cached_tokens if response.usage and response.usage.prompt_cached_tokens else 0
-            }
-            
-            print_status(f"o3 usage: {usage_info['prompt_tokens']} prompt + {usage_info['completion_tokens']} completion tokens", Colors.BLUE)
             
             # Extract JSON from response
             if response_text.startswith('```'):
@@ -253,11 +445,11 @@ class PlannerClient:
             plan = PlanJSON(**plan_data)
             
             print_status(f"Plan created: {len(plan.steps)} steps, complexity: {plan.estimated_complexity}", Colors.GREEN)
-            return plan, usage_info
+            return plan
             
         except Exception as e:
             print_status(f"o3 planner failed, creating fallback plan: {e}", Colors.RED)
-            return self._create_fallback_plan(user_task), {"model": O3_PLANNER_MODEL, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
+            return self._create_fallback_plan(user_task)
     
     def _build_planner_prompt(self, user_task: str) -> str:
         return f"""You are an expert web automation planner. Analyze the user's task and create a structured plan using ONLY generic primitives.
@@ -324,9 +516,9 @@ Output JSON format:
 class LocalExecutor:
     """Primary executor using local model + deterministic action loop."""
     
-    def __init__(self, controller: Controller, vision_analyzer: VisionAnalyzer):
+    def __init__(self, controller: Controller, vision_builder: VisionStateBuilder):
         self.controller = controller
-        self.vision_analyzer = vision_analyzer
+        self.vision_builder = vision_builder
         self.browser_session: Optional[BrowserSession] = None
     
     async def execute_action(self, action: GenericAction, context: ExecutionContext) -> HistoryStep:
@@ -341,14 +533,7 @@ class LocalExecutor:
             if action.primitive == "go_to_url":
                 result = await self._go_to_url(action.target)
                 # Take screenshot after navigation
-                screenshot_event = self.browser_session.event_bus.dispatch(ScreenshotEvent(full_page=False))
-                screenshot_b64 = await screenshot_event.event_result(raise_if_any=True, raise_if_none=True)
-                
-                import tempfile
-                import base64
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                    f.write(base64.b64decode(screenshot_b64))
-                    screenshot_path = f.name
+                screenshot_path = await self.browser_session.take_screenshot()
                 
             elif action.primitive == "click":
                 result = await self._click(action.target)
@@ -367,8 +552,7 @@ class LocalExecutor:
                 
             elif action.primitive == "analyze_vision":
                 result = await self._analyze_vision()
-                # Screenshot already taken in _analyze_vision method
-                screenshot_path = None
+                screenshot_path = await self.browser_session.take_screenshot()
                 
             elif action.primitive == "search_web":
                 result = await self._search_web(action.value)
@@ -404,9 +588,7 @@ class LocalExecutor:
             raise Exception("Browser session not initialized")
         
         print_status(f"Navigating to: {url}", Colors.BLUE)
-        # Use Browser-Use 0.6.x CDP navigation method (same as test_vision.py)
-        await self.browser_session._cdp_navigate(url)
-        await asyncio.sleep(1.0)  # Give page time to load
+        await self.browser_session.navigate_to(url, wait_condition="load", timeout=NAVIGATION_TIMEOUT_MS)
         state = await self.browser_session.get_browser_state_summary()
         
         return ActionResult(
@@ -417,27 +599,28 @@ class LocalExecutor:
     async def _click(self, selector: str) -> ActionResult:
         """Click element by selector."""
         try:
-            # Browser-Use 0.6.x uses event-driven system for clicks
-            # For now, return placeholder - this needs DOM integration to get element node
-            return ActionResult(extracted_content=f"Click action prepared for: {selector} (requires DOM integration)", include_in_memory=True)
+            # Use browser session to click element
+            await self.browser_session.click_element(selector)
+            return ActionResult(extracted_content=f"Clicked: {selector}", include_in_memory=True)
         except Exception as e:
             return ActionResult(extracted_content=f"Click failed: {e}", include_in_memory=True)
     
     async def _type(self, selector: str, text: str) -> ActionResult:
         """Type text into element."""
         try:
-            # Browser-Use 0.6.x uses event-driven system for typing
-            # For now, return placeholder - this needs DOM integration to get element node
-            return ActionResult(extracted_content=f"Type action prepared for '{text}' into: {selector} (requires DOM integration)", include_in_memory=True)
+            await self.browser_session.type_text(selector, text)
+            return ActionResult(extracted_content=f"Typed '{text}' into: {selector}", include_in_memory=True)
         except Exception as e:
             return ActionResult(extracted_content=f"Type failed: {e}", include_in_memory=True)
     
     async def _scroll(self, direction: str = "down") -> ActionResult:
         """Scroll page."""
         try:
-            # Browser-Use 0.6.x uses event-driven system for scrolling
-            # For now, return placeholder - this needs DOM integration to get page element
-            return ActionResult(extracted_content=f"Scroll action prepared for: {direction} (requires DOM integration)", include_in_memory=True)
+            if direction == "up":
+                await self.browser_session.scroll(-500)
+            else:
+                await self.browser_session.scroll(500)
+            return ActionResult(extracted_content=f"Scrolled {direction}", include_in_memory=True)
         except Exception as e:
             return ActionResult(extracted_content=f"Scroll failed: {e}", include_in_memory=True)
     
@@ -462,19 +645,9 @@ class LocalExecutor:
         """Analyze current page with local vision model."""
         try:
             state = await self.browser_session.get_browser_state_summary()
+            screenshot_path = await self.browser_session.take_screenshot()
             
-            # Take screenshot using Browser-Use 0.6.x event system
-            screenshot_event = self.browser_session.event_bus.dispatch(ScreenshotEvent(full_page=False))
-            screenshot_b64 = await screenshot_event.event_result(raise_if_any=True, raise_if_none=True)
-            
-            # Save screenshot to file
-            import tempfile
-            import base64
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                f.write(base64.b64decode(screenshot_b64))
-                screenshot_path = f.name
-            
-            vision_state = await self.vision_analyzer.analyze(
+            vision_state = await self.vision_builder.build_vision_state(
                 str(screenshot_path), state.url or "", state.title or ""
             )
             
@@ -639,7 +812,7 @@ Return ONLY the most essential actions (JSON):
 # Custom Action for Vision Analysis
 # ----------------------------
 
-async def register_vision_action(controller: Controller, vision_analyzer: VisionAnalyzer, screenshots_dir: Path):
+async def register_vision_action(controller: Controller, vision_builder: VisionStateBuilder, screenshots_dir: Path):
     """Register custom action for vision analysis."""
     
     @controller.action("Analyze current page with local vision")
@@ -647,19 +820,8 @@ async def register_vision_action(controller: Controller, vision_analyzer: Vision
         """Take screenshot and analyze with local VLM. No-fail implementation."""
         try:
             state = await browser_session.get_browser_state_summary()
-            
-            # Take screenshot using Browser-Use 0.6.x event system
-            screenshot_event = browser_session.event_bus.dispatch(ScreenshotEvent(full_page=False))
-            screenshot_b64 = await screenshot_event.event_result(raise_if_any=True, raise_if_none=True)
-            
-            # Save screenshot to file
-            import tempfile
-            import base64
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                f.write(base64.b64decode(screenshot_b64))
-                screenshot_path = f.name
-            
-            vision_state = await vision_analyzer.analyze(
+            screenshot_path = await browser_session.take_screenshot()
+            vision_state = await vision_builder.build_vision_state(
                 str(screenshot_path), state.url or "", state.title or ""
             )
             summary = (
@@ -725,7 +887,7 @@ class HybridAgent:
         
         # Initialize components according to new architecture
         self.planner_client = PlannerClient()  # o3 planner (runs once)
-        self.vision_analyzer = VisionAnalyzer()  # Local vision analysis
+        self.vision_builder = VisionStateBuilder()  # Local vision analysis
         self.escalation_manager = EscalationManager()  # Handles stuck states
         
         # Browser-Use components (initialized on first use)
@@ -748,7 +910,7 @@ class HybridAgent:
                 await self._initialize_browser()
             
             # STEP 1: Run o3 planner exactly once
-            plan, planner_usage = await self.planner_client.create_plan(task)
+            plan = await self.planner_client.create_plan(task)
             print_status(f"Plan normalized: {plan.normalized_task}", Colors.GREEN)
             
             # STEP 2: Initialize execution context
@@ -767,32 +929,19 @@ class HybridAgent:
             final_screenshot = None
             if self.browser_session:
                 try:
-                    screenshot_event = self.browser_session.event_bus.dispatch(ScreenshotEvent(full_page=False))
-                    screenshot_b64 = await screenshot_event.event_result(raise_if_any=True, raise_if_none=True)
-                    
-                    import tempfile
-                    import base64
-                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                        f.write(base64.b64decode(screenshot_b64))
-                        final_screenshot = f.name
+                    final_screenshot = await self.browser_session.take_screenshot()
                     print_status(f"Final screenshot: {final_screenshot}", Colors.GREEN)
                 except Exception as e:
                     print_status(f"Failed to capture final screenshot: {e}", Colors.YELLOW)
             
-            # Create cost info with actual usage data
-            cost_breakdown = self._estimate_cost(plan, context, planner_usage)
+            # Create cost info
             cost_info = {
                 "planner_model": O3_PLANNER_MODEL,
                 "executor_model": LOCAL_EXECUTOR_MODEL,
                 "escalation_model": GEMINI_BACKUP_MODEL,
                 "total_steps": len(context.history),
                 "escalation_level": context.escalation_level,
-                "prompt_tokens": cost_breakdown["total_prompt_tokens"],
-                "completion_tokens": cost_breakdown["total_completion_tokens"],
-                "total_tokens": cost_breakdown["total_prompt_tokens"] + cost_breakdown["total_completion_tokens"],
-                "estimated_cost": cost_breakdown["total_cost"],
-                "planner_cost": cost_breakdown["planner_cost"],
-                "escalation_cost": cost_breakdown["escalation_cost"]
+                "estimated_cost": self._estimate_cost(plan, context)
             }
             
             # Create result summary
@@ -918,19 +1067,9 @@ class HybridAgent:
         """Update vision context after navigation or major changes."""
         try:
             state = await self.browser_session.get_browser_state_summary()
+            screenshot_path = await self.browser_session.take_screenshot()
             
-            # Take screenshot using Browser-Use 0.6.x event system
-            screenshot_event = self.browser_session.event_bus.dispatch(ScreenshotEvent(full_page=False))
-            screenshot_b64 = await screenshot_event.event_result(raise_if_any=True, raise_if_none=True)
-            
-            # Save screenshot to file
-            import tempfile
-            import base64
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                f.write(base64.b64decode(screenshot_b64))
-                screenshot_path = f.name
-            
-            vision_state = await self.vision_analyzer.analyze(
+            vision_state = await self.vision_builder.build_vision_state(
                 str(screenshot_path), state.url or "", state.title or ""
             )
             
@@ -950,83 +1089,17 @@ class HybridAgent:
         
         return None
     
-    def _estimate_cost(self, plan: PlanJSON, context: ExecutionContext, actual_usage: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Calculate actual cost based on token usage and current pricing."""
-        # Current pricing per 1000 tokens (as of Jan 2025)
-        model_pricing = {
-            "o3": {"input": 0.015, "output": 0.06},  # $15/$60 per 1M tokens
-            "o3-mini": {"input": 0.003, "output": 0.012},  # $3/$12 per 1M tokens  
-            "gemini-2.0-flash-exp": {"input": 0.000075, "output": 0.0003},  # $0.075/$0.30 per 1M tokens
-            "minicpm-v": {"input": 0.0, "output": 0.0},  # Local model - no cost
-        }
+    def _estimate_cost(self, plan: PlanJSON, context: ExecutionContext) -> float:
+        """Estimate total cost based on models used."""
+        # Rough cost estimation based on complexity and escalations
+        base_cost = 0.01  # o3 planner cost
         
-        cost_breakdown = {
-            "planner_cost": 0.0,
-            "escalation_cost": 0.0,
-            "total_prompt_tokens": 0,
-            "total_completion_tokens": 0,
-            "total_cost": 0.0
-        }
+        if context.escalation_level == "gemini":
+            base_cost += 0.005  # Gemini backup cost
+        elif context.escalation_level == "o3":
+            base_cost += 0.02   # o3 escalation cost
         
-        if actual_usage:
-            # Use actual token usage if provided
-            prompt_tokens = actual_usage.get('prompt_tokens', 0)
-            completion_tokens = actual_usage.get('completion_tokens', 0)
-            model = actual_usage.get('model', O3_PLANNER_MODEL)
-            
-            cost_breakdown["total_prompt_tokens"] += prompt_tokens
-            cost_breakdown["total_completion_tokens"] += completion_tokens
-            
-            if model in model_pricing:
-                pricing = model_pricing[model]
-                model_cost = (prompt_tokens * pricing["input"] / 1000) + (completion_tokens * pricing["output"] / 1000)
-                
-                if model == O3_PLANNER_MODEL:
-                    cost_breakdown["planner_cost"] = model_cost
-                elif model in [GEMINI_BACKUP_MODEL, O3_ESCALATION_MODEL]:
-                    cost_breakdown["escalation_cost"] = model_cost
-                    
-                cost_breakdown["total_cost"] += model_cost
-        else:
-            # Fallback to estimation based on complexity
-            if plan.estimated_complexity == "simple":
-                est_prompt_tokens, est_completion_tokens = 1000, 300
-            elif plan.estimated_complexity == "medium":
-                est_prompt_tokens, est_completion_tokens = 2000, 600
-            else:  # complex
-                est_prompt_tokens, est_completion_tokens = 3000, 1000
-            
-            cost_breakdown["total_prompt_tokens"] = est_prompt_tokens
-            cost_breakdown["total_completion_tokens"] = est_completion_tokens
-            
-            # Estimate planner cost (o3)
-            o3_pricing = model_pricing[O3_PLANNER_MODEL]
-            planner_cost = (est_prompt_tokens * o3_pricing["input"] / 1000) + (est_completion_tokens * o3_pricing["output"] / 1000)
-            cost_breakdown["planner_cost"] = planner_cost
-            cost_breakdown["total_cost"] = planner_cost
-            
-            # Add escalation costs if needed
-            if context.escalation_level == "gemini":
-                gemini_pricing = model_pricing[GEMINI_BACKUP_MODEL]
-                escalation_cost = (500 * gemini_pricing["input"] / 1000) + (200 * gemini_pricing["output"] / 1000)
-                cost_breakdown["escalation_cost"] = escalation_cost
-                cost_breakdown["total_cost"] += escalation_cost
-            elif context.escalation_level == "o3":
-                escalation_cost = (1000 * o3_pricing["input"] / 1000) + (400 * o3_pricing["output"] / 1000)
-                cost_breakdown["escalation_cost"] = escalation_cost
-                cost_breakdown["total_cost"] += escalation_cost
-        
-        return cost_breakdown
-    
-    def _create_initial_context(self) -> ExecutionContext:
-        """Create initial execution context."""
-        return ExecutionContext(
-            current_step=0,
-            stuck_count=0,
-            escalation_level="local",
-            history=[],
-            last_vision_state=None
-        )
+        return base_cost
     
     def _create_result_summary(self, task: str, plan: PlanJSON, context: ExecutionContext, 
                               result: Dict[str, Any], screenshot: Optional[Path], 
@@ -1080,16 +1153,13 @@ class HybridAgent:
         # Create browser session
         self.browser_session = BrowserSession(browser_profile=browser_profile)
         
-        # Start the browser session (this initializes CDP)
-        await self.browser_session.start()
-        
         # Initialize controller and register actions
         self.controller = Controller()
-        await register_vision_action(self.controller, self.vision_analyzer, self.screenshots_dir)
+        await register_vision_action(self.controller, self.vision_builder, self.screenshots_dir)
         await register_serper_action(self.controller)
         
-        # Initialize LocalExecutor with controller and vision analyzer
-        self.local_executor = LocalExecutor(self.controller, self.vision_analyzer)
+        # Initialize LocalExecutor with controller and vision builder
+        self.local_executor = LocalExecutor(self.controller, self.vision_builder)
         self.local_executor.set_browser_session(self.browser_session)
         
         print_status("Browser session and LocalExecutor initialized", Colors.GREEN)
