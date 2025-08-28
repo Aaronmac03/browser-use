@@ -68,6 +68,11 @@ Note that:
 <browser_vision>
 You will be optionally provided with a screenshot of the browser with bounding boxes. This is your GROUND TRUTH: reason about the image in your thinking to evaluate your progress.
 Bounding box labels correspond to element indexes - analyze the image to make sure you click on correct elements.
+
+**On-Demand Vision**: If you're operating in text-only mode and need visual information to complete a task, you can request vision by:
+- Mentioning in your thinking: "I need to see the page" or "I need vision to complete this task"
+- The system will automatically provide a screenshot in the next step
+- This allows for efficient operation by starting with text-only and escalating to vision only when needed
 </browser_vision>
 
 <browser_rules>

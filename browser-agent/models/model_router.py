@@ -13,7 +13,14 @@ from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from config.models import ModelConfig, ModelConfigManager, ModelCapability, ModelProvider
+from config.models import ModelConfig, ModelConfigManager, ModelCapability, ModelProvider, TaskComplexity
+from config.central_model_config import (
+	CENTRAL_MODEL_CONFIG,
+	get_planner_model,
+	get_tier_models,
+	get_escalation_chain,
+	ModelTier
+)
 from models.local_handler import OllamaModelHandler
 from models.cloud_handler import CloudModelManager, TokenUsage
 
@@ -38,6 +45,7 @@ class TaskRequirements:
     preferred_providers: Optional[List[ModelProvider]] = None
     avoid_providers: Optional[List[ModelProvider]] = None
     is_planning_task: bool = False  # True for high-level planning tasks
+    complexity: TaskComplexity = TaskComplexity.MODERATE  # Default complexity level
 
 
 @dataclass
@@ -147,17 +155,46 @@ class ModelRouter:
         self._model_performance: Dict[str, Dict[str, Any]] = {}
         self._routing_history: List[Dict[str, Any]] = []
         
-        # Model progression chains
-        self._planning_model = "gpt-4o"  # Single-shot planner (o3-mini not yet available)
-        self._execution_chain = ["granite3.2-vision", "gemini-2.5-flash", "gpt-4o"]  # Executor with escalation
+        # Use centralized model configuration
+        self._central_config = CENTRAL_MODEL_CONFIG
+        
+        # Get planner and execution models from centralized config
+        planner_config = get_planner_model()
+        self._planning_model = planner_config.name
+        
+        # Build execution chain from tier progression
+        text_models = get_tier_models(ModelTier.TEXT_LOCAL)
+        vision_models = get_tier_models(ModelTier.VISION_LOCAL) 
+        cloud_models = get_tier_models(ModelTier.CLOUD)
+        
+        # Create execution chain: primary from each tier
+        execution_models = []
+        if text_models:
+            execution_models.append(text_models[0].name)  # Primary text model
+        if vision_models:
+            execution_models.append(vision_models[0].name)  # Primary vision model
+        if cloud_models:
+            execution_models.append(cloud_models[0].name)  # Primary cloud model
+        
+        self._execution_chain = execution_models or ["granite3.2-vision", "gemini-2.5-flash", "gpt-4o"]  # Fallback
 
     def get_model_for_task(self, task_requirements: TaskRequirements) -> str:
-        """Get the appropriate model for a task based on new progression."""
+        """Get the appropriate model for a task using centralized configuration."""
         if task_requirements.is_planning_task:
+            # Always use o3-2025-04-16 for planning
             return self._planning_model
         else:
-            # Always start with granite3.2-vision for execution
-            return self._execution_chain[0]
+            # Determine starting tier based on vision requirements
+            escalation_chain = get_escalation_chain(requires_vision=task_requirements.requires_vision)
+            
+            if escalation_chain:
+                # Get primary model from first tier in escalation chain
+                first_tier = escalation_chain[0]
+                primary_model = self._central_config.get_primary_model(first_tier)
+                return primary_model.name
+            else:
+                # Fallback to first execution model
+                return self._execution_chain[0] if self._execution_chain else "qwen3:8b"
 
     async def select_model(
         self,
@@ -179,30 +216,47 @@ class ModelRouter:
         """
         strategy = strategy or self.default_strategy
         
-        # Use new simplified model progression
+        # Use centralized configuration for model selection
         model_name = self.get_model_for_task(task_requirements)
         model_config = self.model_config_manager.get_model_config(model_name)
         
         if not model_config:
-            raise RuntimeError(f"Model configuration not found for: {model_name}")
+            # Try to create compatible config from centralized config
+            central_model = self._central_config.get_model_by_name(model_name)
+            if central_model:
+                try:
+                    model_config = self._create_compatible_model_config(central_model)
+                except Exception as e:
+                    raise RuntimeError(f"Model configuration not found for: {model_name}, failed to create compatible config: {e}")
+            else:
+                raise RuntimeError(f"Model configuration not found for: {model_name}")
         
-        # Verify model meets basic requirements
+        # Verify model meets basic requirements and escalate if needed
         if task_requirements.requires_vision and not model_config.specs.supports_vision:
-            # Escalate to next model in chain if vision required but not supported
+            # Use centralized escalation logic
             if not task_requirements.is_planning_task:
-                for escalation_model in self._execution_chain[1:]:
-                    esc_config = self.model_config_manager.get_model_config(escalation_model)
-                    if esc_config and esc_config.specs.supports_vision:
-                        model_config = esc_config
+                escalation_chain = get_escalation_chain(requires_vision=True)
+                for tier in escalation_chain:
+                    tier_models = get_tier_models(tier)
+                    for central_model in tier_models:
+                        if "vision" in [cap.value for cap in central_model.capabilities]:
+                            esc_config = self.model_config_manager.get_model_config(central_model.name)
+                            if not esc_config:
+                                try:
+                                    esc_config = self._create_compatible_model_config(central_model)
+                                except Exception:
+                                    continue
+                            if esc_config:
+                                model_config = esc_config
+                                break
+                    if model_config and model_config.specs.supports_vision:
                         break
         
         # Record routing decision
         self._record_simple_routing_decision(task_requirements, model_config)
         
-        self.logger.info(
-            f"Selected model: {model_config.name} "
-            f"({'planner' if task_requirements.is_planning_task else 'executor'})"
-        )
+        task_type = "planner" if task_requirements.is_planning_task else "executor"
+        self.logger.info(f"Selected model: {model_config.name} ({task_type}) via centralized config")
         
         return model_config
 
@@ -433,6 +487,30 @@ class ModelRouter:
             reasons.append("cloud-based")
         
         return f"Selected for {strategy.value} strategy: {', '.join(reasons)}"
+    
+    def _create_compatible_model_config(self, central_model) -> ModelConfig:
+        """Create a compatible ModelConfig from central model configuration."""
+        from config.central_model_config import ModelProvider as CentralProvider
+        
+        # Map central providers to config providers
+        provider_map = {
+            CentralProvider.OLLAMA: ModelProvider.OLLAMA,
+            CentralProvider.OPENAI: ModelProvider.OPENAI,
+            CentralProvider.ANTHROPIC: ModelProvider.ANTHROPIC,
+            CentralProvider.GOOGLE: ModelProvider.GOOGLE
+        }
+        
+        # Create a compatible ModelConfig
+        return ModelConfig(
+            name=central_model.name,
+            provider=provider_map.get(central_model.provider, ModelProvider.OPENAI),
+            model_id=central_model.model_id or central_model.name,
+            supports_vision="vision" in [cap.value for cap in central_model.capabilities],
+            context_length=central_model.specs.context_length,
+            estimated_memory_gb=central_model.specs.memory_gb,
+            tokens_per_second=central_model.specs.tokens_per_second,
+            cost_per_1k_tokens=central_model.specs.cost_per_1k_input
+        )
 
     def _record_simple_routing_decision(
         self,
@@ -475,7 +553,21 @@ class ModelRouter:
         Returns:
             Generated text, token usage, and used model config
         """
-        fallback_models = self._execution_chain if not task_requirements.is_planning_task else [self._planning_model]
+        # Use centralized configuration for fallbacks
+        if task_requirements.is_planning_task:
+            fallback_models = [self._planning_model]
+        else:
+            # Build comprehensive fallback chain using centralized escalation
+            escalation_chain = get_escalation_chain(requires_vision=task_requirements.requires_vision)
+            fallback_models = []
+            
+            for tier in escalation_chain:
+                tier_models = get_tier_models(tier)
+                fallback_models.extend([m.name for m in tier_models])
+            
+            # Fallback to old execution chain if centralized config fails
+            if not fallback_models:
+                fallback_models = self._execution_chain
         
         last_error = None
         

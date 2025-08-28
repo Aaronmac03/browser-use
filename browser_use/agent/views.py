@@ -33,6 +33,7 @@ class AgentSettings(BaseModel):
 	use_vision: bool = True
 	vision_detail_level: Literal['auto', 'low', 'high'] = 'auto'
 	use_vision_for_planner: bool = False
+	use_on_demand_vision: bool = False  # Enable on-demand vision detection strategy
 	save_conversation_path: str | Path | None = None
 	save_conversation_path_encoding: str | None = 'utf-8'
 	max_failures: int = 3
@@ -70,6 +71,10 @@ class AgentState(BaseModel):
 	paused: bool = False
 	stopped: bool = False
 	session_initialized: bool = False  # Track if session events have been dispatched
+	
+	# On-demand vision tracking
+	current_step_needs_vision: bool = False  # Whether current step needs vision
+	vision_requirements_history: dict[str, bool] = Field(default_factory=dict)  # Track vision needs by action type and URL
 
 	message_manager_state: MessageManagerState = Field(default_factory=MessageManagerState)
 	file_system_state: FileSystemState | None = None
@@ -97,6 +102,9 @@ class ActionResult(BaseModel):
 
 	# Error handling - always include in long term memory
 	error: str | None = None
+
+	# Vision requirement feedback for on-demand vision detection
+	needs_vision: bool = False
 
 	# Files
 	attachments: list[str] | None = None  # Files to display in the done message

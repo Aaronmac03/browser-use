@@ -153,6 +153,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		output_model_schema: type[AgentStructuredOutput] | None = None,
 		use_vision: bool = True,
 		use_vision_for_planner: bool = False,  # Deprecated
+		use_on_demand_vision: bool = False,
 		save_conversation_path: str | Path | None = None,
 		save_conversation_path_encoding: str | None = 'utf-8',
 		max_failures: int = 3,
@@ -250,6 +251,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			use_vision=use_vision,
 			vision_detail_level=vision_detail_level,
 			use_vision_for_planner=False,  # Always False now (deprecated)
+			use_on_demand_vision=use_on_demand_vision,
 			save_conversation_path=save_conversation_path,
 			save_conversation_path_encoding=save_conversation_path_encoding,
 			max_failures=max_failures,
@@ -680,6 +682,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	async def _prepare_context(self, step_info: AgentStepInfo | None = None) -> BrowserStateSummary:
 		"""Prepare the context for the step: browser state, action models, page actions"""
 		# step_start_time is now set in step() method
+		
+		# Reset vision requirement for new step (on-demand vision strategy)
+		if self.settings.use_on_demand_vision:
+			# Only reset if we're not in the middle of a vision escalation
+			if not self.state.current_step_needs_vision:
+				self.logger.debug('📝 Starting new step with text-only model (on-demand vision)')
+			else:
+				self.logger.debug('🔍 Continuing with vision model (escalated from previous step)')
 
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 
@@ -713,6 +723,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Get page-specific filtered actions
 		page_filtered_actions = self.controller.registry.get_prompt_description(browser_state_summary.url)
 
+		# Determine vision usage for this step using on-demand strategy
+		use_vision_for_step = self._should_use_vision_for_step(browser_state_summary.url)
+		
 		# Page-specific actions will be included directly in the browser_state message
 		self.logger.debug(f'💬 Step {self.state.n_steps}: Creating state messages for context...')
 		self._message_manager.create_state_messages(
@@ -720,7 +733,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			model_output=self.state.last_model_output,
 			result=self.state.last_result,
 			step_info=step_info,
-			use_vision=self.settings.use_vision,
+			use_vision=use_vision_for_step,
 			page_filtered_actions=page_filtered_actions if page_filtered_actions else None,
 			sensitive_data=self.sensitive_data,
 			available_file_paths=self.available_file_paths,  # Always pass current available_file_paths
@@ -756,6 +769,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		self.state.last_model_output = model_output
 
+		# Check if model output indicates vision is needed (for on-demand vision)
+		if self.settings.use_on_demand_vision:
+			vision_needed_from_output = self._check_if_vision_needed_from_model_output(model_output)
+			if vision_needed_from_output and not self.state.current_step_needs_vision:
+				self.state.current_step_needs_vision = True
+				self.logger.info('🔍 Model indicated vision is needed - will retry with vision')
+				# We could potentially retry the step here, but for now just flag it for next iteration
+
 		# Check again for paused/stopped state after getting model output
 		await self._raise_if_stopped_or_paused()
 
@@ -782,6 +803,26 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Check for new downloads after executing actions
 		await self._check_and_update_downloads('after executing actions')
+
+		# Handle on-demand vision learning and escalation
+		if self.settings.use_on_demand_vision and self.state.last_result:
+			# Check if any action indicated it needs vision
+			vision_needed = self._check_if_vision_needed_from_results(self.state.last_result)
+			
+			if vision_needed and not self.state.current_step_needs_vision:
+				# Escalate to vision for next retry/step
+				self.state.current_step_needs_vision = True
+				self.logger.info('🔍 Escalating to vision model due to action feedback')
+			
+			# Record vision requirements for learning
+			if self.state.last_model_output and self.state.last_model_output.action:
+				action_type = type(self.state.last_model_output.action[0]).__name__
+				current_url = self.browser_session.get_current_url() if self.browser_session else ""
+				self._record_vision_requirement(action_type, current_url, vision_needed)
+			
+			# Reset vision requirement for next step (start fresh each step)
+			if not vision_needed:
+				self.state.current_step_needs_vision = False
 
 		# check for action errors  and len more than 1
 		if self.state.last_result and len(self.state.last_result) == 1 and self.state.last_result[-1].error:
@@ -1885,6 +1926,88 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		except Exception as e:
 			self.logger.error(f'Error during cleanup: {e}')
+
+	def _should_use_vision_for_step(self, current_url: str) -> bool:
+		"""Determine if vision should be used for the current step based on on-demand strategy"""
+		if not self.settings.use_on_demand_vision:
+			# Use traditional vision setting
+			return self.settings.use_vision
+		
+		# On-demand vision strategy: start with text-only by default
+		if self.state.current_step_needs_vision:
+			self.logger.debug('🔍 Using vision for current step (escalated from text-only)')
+			return True
+		
+		# Check if we've learned that this type of step needs vision
+		if self.state.last_model_output and self.state.last_model_output.action:
+			action_type = type(self.state.last_model_output.action[0]).__name__
+			history_key = f"{action_type}:{current_url}"
+			if self.state.vision_requirements_history.get(history_key, False):
+				self.logger.debug(f'🔍 Using vision based on learned requirement for {action_type} on this URL')
+				return True
+		
+		self.logger.debug('📝 Starting with text-only model (on-demand vision strategy)')
+		return False
+
+	def _record_vision_requirement(self, action_type: str, current_url: str, needs_vision: bool) -> None:
+		"""Record whether a specific action type on a URL needs vision"""
+		if not self.settings.use_on_demand_vision:
+			return
+		
+		history_key = f"{action_type}:{current_url}"
+		self.state.vision_requirements_history[history_key] = needs_vision
+		if needs_vision:
+			self.logger.debug(f'📚 Learned that {action_type} needs vision on this URL')
+
+	def _check_if_vision_needed_from_results(self, results: list[ActionResult]) -> bool:
+		"""Check if any action result indicates vision is needed"""
+		if not self.settings.use_on_demand_vision:
+			return False
+		
+		# Check explicit needs_vision flag
+		if any(result.needs_vision for result in results if result.needs_vision):
+			return True
+		
+		# Check for error messages that indicate vision is needed
+		vision_keywords = [
+			"can't see", "cannot see", "need to see", "visual", "screenshot", 
+			"image", "picture", "visual information", "see the page", "view the page",
+			"unable to see", "cannot view", "need vision", "require vision"
+		]
+		
+		for result in results:
+			if result.error:
+				error_lower = result.error.lower()
+				if any(keyword in error_lower for keyword in vision_keywords):
+					self.logger.debug(f'🔍 Detected vision need from error: {result.error[:100]}...')
+					return True
+		
+		return False
+
+	def _check_if_vision_needed_from_model_output(self, model_output: 'AgentOutput') -> bool:
+		"""Check if model output indicates vision is needed"""
+		if not self.settings.use_on_demand_vision:
+			return False
+		
+		# Check thinking field for vision-related requests
+		if model_output.thinking:
+			thinking_lower = model_output.thinking.lower()
+			vision_keywords = [
+				"need to see", "can't see", "cannot see", "visual", "screenshot",
+				"need vision", "require vision", "see the page", "view the page"
+			]
+			if any(keyword in thinking_lower for keyword in vision_keywords):
+				self.logger.debug(f'🔍 Detected vision need from thinking: {model_output.thinking[:100]}...')
+				return True
+		
+		# Check memory field for vision-related content
+		if model_output.memory:
+			memory_lower = model_output.memory.lower()
+			if any(keyword in memory_lower for keyword in ["need to see", "cannot see", "require vision"]):
+				self.logger.debug(f'🔍 Detected vision need from memory: {model_output.memory[:100]}...')
+				return True
+		
+		return False
 
 	async def _update_action_models_for_page(self, page_url: str) -> None:
 		"""Update action models with page-specific actions"""
