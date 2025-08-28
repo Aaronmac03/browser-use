@@ -47,7 +47,7 @@ async def async_main(settings: Settings):
     logger = logging.getLogger(__name__)
     
     # Import components
-    from config.models import ModelConfigManager, TaskComplexity
+    from config.models import ModelConfigManager
     from config.profiles import BrowserProfileManager, ProfileType, SecurityLevel
     from models.local_handler import OllamaModelHandler
     from models.cloud_handler import CloudModelManager, BudgetManager, ResponseCache
@@ -189,28 +189,27 @@ async def demonstrate_functionality(
     logger.info("1. Testing model selection...")
     try:
         from models.model_router import TaskRequirements
-        from config.models import TaskComplexity
         
-        # Test simple task
-        simple_task = TaskRequirements(
-            complexity=TaskComplexity.SIMPLE,
+        # Test planning task
+        planning_task = TaskRequirements(
+            is_planning_task=True,
             requires_vision=False
         )
         
-        selected_model = await model_router.select_model(simple_task)
-        logger.info(f"Selected model for simple task: {selected_model.name} ({selected_model.provider.value})")
+        selected_model = await model_router.select_model(planning_task)
+        logger.info(f"Selected model for planning task: {selected_model.name} ({selected_model.provider.value})")
         
-        # Test complex task with vision
-        complex_task = TaskRequirements(
-            complexity=TaskComplexity.COMPLEX,
-            requires_vision=True
+        # Test execution task with vision
+        execution_task = TaskRequirements(
+            requires_vision=True,
+            requires_code=True
         )
         
         try:
-            selected_model = await model_router.select_model(complex_task)
-            logger.info(f"Selected model for complex vision task: {selected_model.name}")
+            selected_model = await model_router.select_model(execution_task)
+            logger.info(f"Selected model for execution task: {selected_model.name}")
         except Exception as e:
-            logger.info(f"No suitable model found for complex vision task: {e}")
+            logger.info(f"No suitable model found for execution task: {e}")
         
     except Exception as e:
         logger.warning(f"Model selection demo failed: {e}")

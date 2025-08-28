@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from config.models import ModelConfig, ModelConfigManager, TaskComplexity, ModelCapability, ModelProvider
+from config.models import ModelConfig, ModelConfigManager, ModelCapability, ModelProvider
 from models.local_handler import OllamaModelHandler
 from models.cloud_handler import CloudModelManager, TokenUsage
 
@@ -31,13 +31,13 @@ class RoutingStrategy(str, Enum):
 @dataclass
 class TaskRequirements:
     """Requirements for a specific task."""
-    complexity: TaskComplexity
     requires_vision: bool = False
     requires_code: bool = False
     max_response_time: Optional[float] = None
     max_cost: Optional[float] = None
     preferred_providers: Optional[List[ModelProvider]] = None
     avoid_providers: Optional[List[ModelProvider]] = None
+    is_planning_task: bool = False  # True for high-level planning tasks
 
 
 @dataclass
@@ -123,7 +123,7 @@ class ModelRouter:
         model_config_manager: ModelConfigManager,
         local_handler: Optional[OllamaModelHandler] = None,
         cloud_manager: Optional[CloudModelManager] = None,
-        default_strategy: RoutingStrategy = RoutingStrategy.BALANCED
+        default_strategy: RoutingStrategy = RoutingStrategy.LOCAL_FIRST
     ):
         """
         Initialize model router.
@@ -147,36 +147,17 @@ class ModelRouter:
         self._model_performance: Dict[str, Dict[str, Any]] = {}
         self._routing_history: List[Dict[str, Any]] = []
         
-        # Fallback chains
-        self._fallback_chains: Dict[TaskComplexity, List[str]] = {}
-        self._initialize_fallback_chains()
+        # Model progression chains
+        self._planning_model = "gpt-4o"  # Single-shot planner (o3-mini not yet available)
+        self._execution_chain = ["granite3.2-vision", "gemini-2.5-flash", "gpt-4o"]  # Executor with escalation
 
-    def _initialize_fallback_chains(self):
-        """Initialize fallback chains for different task complexities."""
-        self._fallback_chains = {
-            TaskComplexity.SIMPLE: [
-                "gpt-4o-mini",
-                "llama3.2",
-                "gpt-4o"
-            ],
-            TaskComplexity.MODERATE: [
-                "gpt-4o-mini",
-                "llama3.2-vision",
-                "claude-3-5-sonnet",
-                "gpt-4o"
-            ],
-            TaskComplexity.COMPLEX: [
-                "claude-3-5-sonnet",
-                "gpt-4o",
-                "gemini-1.5-pro",
-                "llama3.2-vision"
-            ],
-            TaskComplexity.EXPERT: [
-                "gpt-4o",
-                "claude-3-5-sonnet",
-                "gemini-1.5-pro"
-            ]
-        }
+    def get_model_for_task(self, task_requirements: TaskRequirements) -> str:
+        """Get the appropriate model for a task based on new progression."""
+        if task_requirements.is_planning_task:
+            return self._planning_model
+        else:
+            # Always start with granite3.2-vision for execution
+            return self._execution_chain[0]
 
     async def select_model(
         self,
@@ -198,62 +179,33 @@ class ModelRouter:
         """
         strategy = strategy or self.default_strategy
         
-        # Get candidate models
-        candidates = await self._get_candidate_models(task_requirements)
+        # Use new simplified model progression
+        model_name = self.get_model_for_task(task_requirements)
+        model_config = self.model_config_manager.get_model_config(model_name)
         
-        if not candidates:
-            raise RuntimeError("No suitable models found for task requirements")
+        if not model_config:
+            raise RuntimeError(f"Model configuration not found for: {model_name}")
         
-        # Score models based on strategy
-        scored_models = await self._score_models(candidates, task_requirements, strategy)
-        
-        # Select best model
-        best_model = max(scored_models, key=lambda x: x.score)
+        # Verify model meets basic requirements
+        if task_requirements.requires_vision and not model_config.specs.supports_vision:
+            # Escalate to next model in chain if vision required but not supported
+            if not task_requirements.is_planning_task:
+                for escalation_model in self._execution_chain[1:]:
+                    esc_config = self.model_config_manager.get_model_config(escalation_model)
+                    if esc_config and esc_config.specs.supports_vision:
+                        model_config = esc_config
+                        break
         
         # Record routing decision
-        self._record_routing_decision(task_requirements, best_model, strategy)
+        self._record_simple_routing_decision(task_requirements, model_config)
         
         self.logger.info(
-            f"Selected model: {best_model.model_config.name} "
-            f"(score: {best_model.score:.2f}, strategy: {strategy.value})"
+            f"Selected model: {model_config.name} "
+            f"({'planner' if task_requirements.is_planning_task else 'executor'})"
         )
         
-        return best_model.model_config
+        return model_config
 
-    async def _get_candidate_models(
-        self, 
-        task_requirements: TaskRequirements
-    ) -> List[ModelConfig]:
-        """Get candidate models that meet task requirements."""
-        candidates = []
-        
-        # Get models for task complexity
-        complexity_models = self.model_config_manager.get_models_for_task(
-            task_requirements.complexity
-        )
-        
-        # Add all available models if none found for complexity
-        if not complexity_models:
-            complexity_models = self.model_config_manager.list_models()
-        
-        for model in complexity_models:
-            # Check capability requirements
-            if task_requirements.requires_vision and not model.supports_capability(ModelCapability.VISION):
-                continue
-            
-            if task_requirements.requires_code and not model.supports_capability(ModelCapability.CODE):
-                continue
-            
-            # Check provider preferences
-            if task_requirements.preferred_providers and model.provider not in task_requirements.preferred_providers:
-                continue
-            
-            if task_requirements.avoid_providers and model.provider in task_requirements.avoid_providers:
-                continue
-            
-            candidates.append(model)
-        
-        return candidates
 
     async def _score_models(
         self,
@@ -482,23 +434,20 @@ class ModelRouter:
         
         return f"Selected for {strategy.value} strategy: {', '.join(reasons)}"
 
-    def _record_routing_decision(
+    def _record_simple_routing_decision(
         self,
         task_requirements: TaskRequirements,
-        selected_model: ModelScore,
-        strategy: RoutingStrategy
+        selected_model: ModelConfig
     ):
-        """Record routing decision for analysis."""
+        """Record simplified routing decision for analysis."""
         decision = {
             "timestamp": datetime.now().isoformat(),
-            "task_complexity": task_requirements.complexity.value,
             "requires_vision": task_requirements.requires_vision,
             "requires_code": task_requirements.requires_code,
-            "selected_model": selected_model.model_config.name,
-            "model_provider": selected_model.model_config.provider.value,
-            "strategy": strategy.value,
-            "score": selected_model.score,
-            "reasoning": selected_model.reasoning
+            "is_planning_task": task_requirements.is_planning_task,
+            "selected_model": selected_model.name,
+            "model_provider": selected_model.provider.value,
+            "reasoning": "planner" if task_requirements.is_planning_task else "executor"
         }
         
         self._routing_history.append(decision)
@@ -526,10 +475,7 @@ class ModelRouter:
         Returns:
             Generated text, token usage, and used model config
         """
-        fallback_models = self._fallback_chains.get(
-            task_requirements.complexity, 
-            ["gpt-4o-mini", "gpt-4o"]
-        )
+        fallback_models = self._execution_chain if not task_requirements.is_planning_task else [self._planning_model]
         
         last_error = None
         
@@ -539,9 +485,10 @@ class ModelRouter:
                 if not model_config:
                     continue
                 
-                # Check if model meets requirements
-                candidates = await self._get_candidate_models(task_requirements)
-                if model_config not in candidates:
+                # Check if model meets basic requirements
+                if task_requirements.requires_vision and not model_config.specs.supports_vision:
+                    continue
+                if task_requirements.requires_code and not model_config.supports_capability(ModelCapability.CODE):
                     continue
                 
                 # Try to execute with this model

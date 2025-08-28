@@ -132,6 +132,26 @@ class ModelConfigManager:
             ]
         )
 
+        self._models["o3-mini"] = ModelConfig(
+            name="OpenAI O3 Mini",
+            provider=ModelProvider.OPENAI,
+            model_id="o3-mini",
+            specs=ModelSpecs(
+                context_length=200000,
+                max_tokens=65536,
+                supports_vision=True,
+                supports_function_calling=True,
+                cost_per_1k_tokens=0.060
+            ),
+            capabilities=[
+                ModelCapability.TEXT_ONLY,
+                ModelCapability.VISION,
+                ModelCapability.CODE,
+                ModelCapability.REASONING,
+                ModelCapability.MULTIMODAL
+            ]
+        )
+
         # Anthropic Models
         self._models["claude-3-5-sonnet"] = ModelConfig(
             name="Claude 3.5 Sonnet",
@@ -213,6 +233,28 @@ class ModelConfigManager:
             ]
         )
 
+        # Granite 3.2 Vision - Primary local model for vision + reasoning
+        self._models["granite3.2-vision"] = ModelConfig(
+            name="Granite 3.2 Vision",
+            provider=ModelProvider.OLLAMA,
+            model_id="granite3.2-vision",
+            specs=ModelSpecs(
+                context_length=16384,
+                max_tokens=4096,
+                supports_vision=True,
+                supports_function_calling=True,
+                estimated_memory_gb=2.0,
+                tokens_per_second=45.0
+            ),
+            capabilities=[
+                ModelCapability.TEXT_ONLY,
+                ModelCapability.VISION,
+                ModelCapability.CODE,
+                ModelCapability.REASONING,
+                ModelCapability.MULTIMODAL
+            ]
+        )
+
         # Google Models
         self._models["gemini-1.5-pro"] = ModelConfig(
             name="Gemini 1.5 Pro",
@@ -234,30 +276,51 @@ class ModelConfigManager:
             ]
         )
 
+        self._models["gemini-2.5-flash"] = ModelConfig(
+            name="Gemini 2.5 Flash",
+            provider=ModelProvider.GOOGLE,
+            model_id="gemini-2.5-flash-exp",
+            specs=ModelSpecs(
+                context_length=1000000,
+                max_tokens=8192,
+                supports_vision=True,
+                supports_function_calling=True,
+                cost_per_1k_tokens=0.0002
+            ),
+            capabilities=[
+                ModelCapability.TEXT_ONLY,
+                ModelCapability.VISION,
+                ModelCapability.CODE,
+                ModelCapability.REASONING,
+                ModelCapability.MULTIMODAL
+            ]
+        )
+
     def _initialize_task_presets(self):
-        """Initialize task complexity presets."""
+        """Initialize task complexity presets with local-first approach."""
         self._task_presets = {
             TaskComplexity.SIMPLE: [
-                "gpt-4o-mini",
+                "granite3.2-vision",
                 "llama3.2",
-                "gemini-1.5-pro"
+                "gemini-2.5-flash"
             ],
             TaskComplexity.MODERATE: [
-                "gpt-4o-mini",
-                "claude-3-5-sonnet",
+                "granite3.2-vision",
                 "llama3.2-vision",
-                "qwen2.5-coder"
+                "qwen2.5-coder",
+                "gemini-2.5-flash"
             ],
             TaskComplexity.COMPLEX: [
-                "gpt-4o",
-                "claude-3-5-sonnet",
-                "gemini-1.5-pro",
-                "llama3.2-vision"
+                "granite3.2-vision",
+                "llama3.2-vision",
+                "gemini-2.5-flash",
+                "claude-3-5-sonnet"
             ],
             TaskComplexity.EXPERT: [
-                "gpt-4o",
+                "granite3.2-vision",
+                "gemini-2.5-flash",
                 "claude-3-5-sonnet",
-                "gemini-1.5-pro"
+                "gpt-4o"
             ]
         }
 
@@ -298,18 +361,6 @@ class ModelConfigManager:
             
         return models
 
-    def get_models_for_task(self, complexity: TaskComplexity) -> List[ModelConfig]:
-        """
-        Get recommended models for a task complexity level.
-        
-        Args:
-            complexity: Task complexity level
-            
-        Returns:
-            List of recommended model configurations
-        """
-        model_names = self._task_presets.get(complexity, [])
-        return [self._models[name] for name in model_names if name in self._models]
 
     def estimate_local_memory_usage(self, model_names: List[str]) -> float:
         """
