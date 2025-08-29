@@ -82,7 +82,7 @@ VISION_FALLBACK = "llava:13b"   # Change fallback vision model here
 
 # TIER 3: CLOUD MODELS (Slowest, Most Expensive, Highest Quality)
 CLOUD_PRIMARY = "gemini-2.5-flash"    # Change primary cloud model here
-CLOUD_SECONDARY = "o3-2025-04-16"     # Change secondary cloud model here
+CLOUD_SECONDARY = "gpt-4o"            # Change secondary cloud model here
 
 # ============================================================================
 
@@ -220,15 +220,15 @@ class CentralModelConfig:
 			name=CLOUD_SECONDARY,
 			provider=ModelProvider.OPENAI,  # Update if changing to different provider
 			tier=ModelTier.CLOUD,
-			capabilities=[ModelCapabilities.REASONING, ModelCapabilities.TEXT_ONLY],
+			capabilities=[ModelCapabilities.VISION, ModelCapabilities.MULTIMODAL, ModelCapabilities.REASONING],
 			specs=ModelSpecs(
-				context_length=200000,
+				context_length=128000,
 				memory_gb=0.0,  # Cloud model
-				cost_per_1k_input=0.060,
-				cost_per_1k_output=0.240
+				cost_per_1k_input=0.0025,
+				cost_per_1k_output=0.010
 			),
 			model_id=CLOUD_SECONDARY,
-			description=f"Secondary cloud model ({CLOUD_SECONDARY}) for complex reasoning tasks",
+			description=f"Secondary cloud model ({CLOUD_SECONDARY}) for complex multimodal tasks",
 			is_primary=False
 		)
 		
@@ -288,6 +288,10 @@ class CentralModelConfig:
 	def get_model_by_name(self, name: str) -> Optional[ModelConfig]:
 		"""Get a model by name."""
 		return self._models.get(name)
+	
+	def get_model_config(self, model_name: str) -> Optional[ModelConfig]:
+		"""Get model configuration by name (compatibility method for ModelRouter)."""
+		return self.get_model_by_name(model_name)
 	
 	def get_all_models(self) -> Dict[str, ModelConfig]:
 		"""Get all configured models."""

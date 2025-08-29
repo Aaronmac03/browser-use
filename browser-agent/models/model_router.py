@@ -490,7 +490,8 @@ class ModelRouter:
     
     def _create_compatible_model_config(self, central_model) -> ModelConfig:
         """Create a compatible ModelConfig from central model configuration."""
-        from config.central_model_config import ModelProvider as CentralProvider
+        from config.central_model_config import ModelProvider as CentralProvider, ModelCapabilities
+        from config.models import ModelSpecs as ConfigModelSpecs, ModelCapability
         
         # Map central providers to config providers
         provider_map = {
@@ -500,16 +501,39 @@ class ModelRouter:
             CentralProvider.GOOGLE: ModelProvider.GOOGLE
         }
         
+        # Map central capabilities to config capabilities
+        capability_map = {
+            ModelCapabilities.TEXT_ONLY: ModelCapability.TEXT_ONLY,
+            ModelCapabilities.VISION: ModelCapability.VISION,
+            ModelCapabilities.CODE: ModelCapability.CODE,
+            ModelCapabilities.REASONING: ModelCapability.REASONING,
+            ModelCapabilities.MULTIMODAL: ModelCapability.MULTIMODAL
+        }
+        
+        # Convert capabilities
+        capabilities = []
+        for cap in central_model.capabilities:
+            if cap in capability_map:
+                capabilities.append(capability_map[cap])
+        
+        # Create compatible ModelSpecs
+        specs = ConfigModelSpecs(
+            context_length=central_model.specs.context_length,
+            max_tokens=min(central_model.specs.context_length, 4096),  # Reasonable default
+            supports_vision=ModelCapabilities.VISION in central_model.capabilities,
+            supports_function_calling=ModelCapabilities.CODE in central_model.capabilities,
+            estimated_memory_gb=central_model.specs.memory_gb,
+            tokens_per_second=central_model.specs.tokens_per_second,
+            cost_per_1k_tokens=central_model.specs.cost_per_1k_input
+        )
+        
         # Create a compatible ModelConfig
         return ModelConfig(
             name=central_model.name,
             provider=provider_map.get(central_model.provider, ModelProvider.OPENAI),
             model_id=central_model.model_id or central_model.name,
-            supports_vision="vision" in [cap.value for cap in central_model.capabilities],
-            context_length=central_model.specs.context_length,
-            estimated_memory_gb=central_model.specs.memory_gb,
-            tokens_per_second=central_model.specs.tokens_per_second,
-            cost_per_1k_tokens=central_model.specs.cost_per_1k_input
+            specs=specs,
+            capabilities=capabilities
         )
 
     def _record_simple_routing_decision(
