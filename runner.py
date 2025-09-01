@@ -230,14 +230,21 @@ async def run_one_subtask(local_llm: ChatOpenAI, browser: Browser, tools: Tools,
 
     # 2) Escalate to o3 just for this subtask
     cloud_llm = make_o3_llm()
+    e_cloud = None
     try:
         out = await _attempt(cloud_llm, "cloud-o3")
         return out
-    except Exception as e_cloud:
+    except Exception as exc:
+        e_cloud = exc
         log(f"[cloud fail] {e_cloud}")
 
     # 3) Last ditch: ask critic for advice, then try local again quickly
-    critic_note = await critic_with_o3_then_gemini(str(e_cloud), title)
+    if e_cloud is not None:
+        critic_note = await critic_with_o3_then_gemini(str(e_cloud), title)
+        log("[critic advice]", critic_note)
+    else:
+        critic_note = "No cloud failure occurred"
+        log("[critic advice]", critic_note)
     log("[critic advice]", critic_note)
     try:
         return await _attempt(local_llm, "local-after-critic")
