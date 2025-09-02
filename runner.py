@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 
 from browser_use import Agent, Browser, ChatOpenAI, Tools
+from browser_use.browser.events import NavigateToUrlEvent
 from browser_use.llm.messages import SystemMessage, UserMessage
 
 # --------- Utilities ---------
@@ -60,20 +61,28 @@ def ensure_profile_copy_if_requested() -> tuple[str, str]:
 
 # --------- LLM clients ---------
 def make_local_llm() -> ChatOpenAI:
-    """Optimized local LLM configuration based on Qwen2.5-7B testing"""
+    """Optimized local LLM configuration for Mistral NeMo 12B Instruct"""
+    # OpenAI-compatible local endpoint (e.g., Ollama, LM Studio). Default to Ollama.
     base_url = env("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    model = env("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_k_m")
+    # Q4_K_M quantization for 16GB machines
+    model = env("OLLAMA_MODEL", "mistral-nemo:12b-instruct-2407-q4_k_m")
     api_key = env("OLLAMA_API_KEY", "ollama")  # placeholder to satisfy OpenAI-compatible signature
-    
+
+    # Note: Some local OpenAI-compatible servers may ignore response_format JSON schema.
+    # To improve reliability, add_schema_to_system_prompt=True so the schema is also present in the prompt.
     return ChatOpenAI(
-        model=model, 
-        base_url=base_url, 
-        api_key=api_key, 
-        timeout=90,  # Balanced timeout for thorough work
-        temperature=0.1,  # Slight creativity while maintaining consistency
-        max_completion_tokens=2048,  # Sufficient for complex responses
-        frequency_penalty=0.2,  # Reduce repetitive actions
-        top_p=0.95,  # Focus on high-probability tokens
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=120,                  # Larger models need more time
+        temperature=0.2,              # Consistent JSON/action output
+        max_completion_tokens=4096,   # 4k context
+        frequency_penalty=0.2,        # Reduce repetitive actions
+        top_p=0.95,
+        add_schema_to_system_prompt=True,
+        # Stop sequences to prevent extra text past JSON in unstructured calls.
+        # These are NOT sent for reasoning models and NOT sent when using structured output.
+        stop=["\n```", "\nAssistant:", "\nObservation:", "\nActions:"],
     )
 
 def make_o3_llm() -> ChatOpenAI:
@@ -112,8 +121,8 @@ PLANNER_SYSTEM = (
     "The executor has access to a web_search tool (Serper API) and full browser automation capabilities.\n\n"
     
     "STRATEGIC GUIDANCE:\n"
-    "- For information gathering: Consider if web_search API can provide sufficient data quickly\n"
-    "- For interactive tasks: Plan direct browser navigation and interaction\n"
+    "- For information gathering: Prefer web_search (Serper API) to discover authoritative sources quickly.\n"
+    "- For interactive tasks: Use web_search to find the right destination, then navigate to that site and interact there (avoid interacting on SERP).\n"
     "- For complex workflows: Break into 2-4 comprehensive subtasks (not micro-steps)\n"
     "- Each subtask should accomplish a meaningful milestone\n"
     "- The local LLM executor is capable - trust it to handle multi-step actions within a subtask\n\n"
@@ -227,6 +236,7 @@ def make_browser() -> Browser:
         profile_directory=prof,
         headless=False,
         devtools=False,
+        keep_alive=True,  # Persist browser across subtasks to maintain session/focus
         # You can pass additional flags if needed:
         # args=["--disable-features=OptimizationGuideModelDownloading", "--disable-renderer-backgrounding"]
     )
@@ -249,8 +259,10 @@ async def run_one_subtask(local_llm: ChatOpenAI, browser: Browser, tools: Tools,
         f"DETAILED INSTRUCTIONS:\n{instructions}\n\n"
         
         "EXECUTION STRATEGY:\n"
-        "- You have web_search tool (Serper API) for quick information gathering\n"
-        "- You have full browser automation capabilities for interactive tasks\n"
+        "- You have web_search tool (Serper API) for quick discovery of relevant sources\n"
+        "- You have full browser automation capabilities for interactive tasks on destination sites\n"
+        "- Strategy: use web_search for discovery, navigate to the destination site, then complete actions there (avoid interacting on SERP pages)\n"
+        "- Prefer staying in a single foreground tab; avoid opening new tabs unless necessary\n"
         "- Choose the most efficient approach - API for data, browser for interaction\n"
         "- Work methodically but efficiently toward the success criteria\n"
         "- Combine multiple related actions when logical\n"
@@ -259,10 +271,36 @@ async def run_one_subtask(local_llm: ChatOpenAI, browser: Browser, tools: Tools,
         "Stay focused on this specific subtask and complete it thoroughly before stopping."
     )
 
+    async def _ensure_browser_ready(reason: str) -> None:
+        """Ensure browser is started and focused on a usable tab."""
+        try:
+            await browser.start()
+        except Exception as e:
+            log(f"[health] Browser.start failed ({reason}): {e}")
+            # Try a hard reset if start fails
+            try:
+                await browser.kill()
+                await browser.start()
+            except Exception as e2:
+                log(f"[health] Browser hard reset failed: {e2}")
+                raise
+
+        # Fallback: if focus is somehow missing, open a blank tab to force focus
+        if not getattr(browser, 'agent_focus', None):
+            log("[health] No agent_focus after start; opening about:blank to establish focus")
+            ev = browser.event_bus.dispatch(NavigateToUrlEvent(url='about:blank', new_tab=True))
+            try:
+                await ev
+                await ev.event_result(raise_if_any=True, raise_if_none=False)
+            except Exception as e:
+                log(f"[health] NavigateToUrlEvent failed to restore focus: {e}")
+
     async def _attempt(llm: ChatOpenAI, tag: str):
         # Optimize agent config based on model type
         is_local = "ollama" in llm.base_url if hasattr(llm, 'base_url') and llm.base_url else False
-        
+        # Proactively ensure browser session is healthy/focused before each attempt
+        await _ensure_browser_ready(f"attempt:{tag}")
+
         agent = Agent(
             task=title,
             llm=llm,
@@ -281,7 +319,7 @@ async def run_one_subtask(local_llm: ChatOpenAI, browser: Browser, tools: Tools,
             # Continuity settings
             injected_agent_state=injected_state,
             include_recent_events=True,
-            directly_open_url=False,
+            directly_open_url=True,
         )
         log(f"[{tag}] starting agent for subtask: {title}")
         result = await agent.run()
@@ -355,13 +393,15 @@ async def main(goal: str):
     tools = build_tools()
     browser = make_browser()
     local_llm = make_local_llm()
-    cfg = RunConfig()
+    # Give complex retail flows a bit more breathing room
+    cfg = RunConfig(max_failures_per_subtask=3, step_timeout_sec=180)
 
     # Log configuration for transparency
     log(f"🎯 Goal: {goal}")
     log(f"🤖 Local model: {local_llm.model} (temp={local_llm.temperature}, timeout={local_llm.timeout}s)")
     log(f"☁️  Cloud model: {env('OPENAI_MODEL', 'o3')} for planning/critic")
     log(f"⚙️  Config: max_failures={cfg.max_failures_per_subtask}, step_timeout={cfg.step_timeout_sec}s")
+    log("🖥️  Browser keep_alive: True (persist across subtasks)")
 
     # 1) Plan with o3 (fallback Gemini)
     log("🧠 Planning with cloud LLM...")
@@ -374,6 +414,11 @@ async def main(goal: str):
     # 2) Execute sequentially with local grinder, escalate per-subtask on failure
     progress_notes: list[str] = []
     shared_state = None
+    # Pre-warm/start the browser once to establish CDP + focus early
+    try:
+        await browser.start()
+    except Exception as e:
+        log(f"[startup] Initial browser.start error (will auto-recover on subtask run): {e}")
     for i, st in enumerate(subtasks, 1):
         title = st.get("title", f"Subtask {i}")
         instructions = st.get("instructions") or st.get("plan") or ""

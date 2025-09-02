@@ -1,5 +1,6 @@
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import List
 from typing import Any, Literal, TypeVar, overload
 
 import httpx
@@ -53,6 +54,8 @@ class ChatOpenAI(BaseChatModel):
 	service_tier: Literal['auto', 'default', 'flex', 'priority', 'scale'] | None = None
 	top_p: float | None = None
 	add_schema_to_system_prompt: bool = False  # Add JSON schema to system prompt instead of using response_format
+	# Optional stop sequences (applied only for non-reasoning models and only when output_format is None)
+	stop: List[str] | None = None
 
 	# Client initialization parameters
 	api_key: str | None = None
@@ -190,7 +193,8 @@ class ChatOpenAI(BaseChatModel):
 				response = await self.get_client().chat.completions.create(
 					model=self.model,
 					messages=openai_messages,
-					**model_params,
+					# Apply stop sequences only for non-reasoning models and only when not using structured output
+					**({**model_params, 'stop': self.stop} if (self.stop is not None and not any(str(m).lower() in str(self.model).lower() for m in ReasoningModels)) else model_params),
 				)
 
 				usage = self._get_usage(response)
