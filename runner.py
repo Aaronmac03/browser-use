@@ -1,4 +1,5 @@
 import asyncio
+import re
 import json
 import os
 import shutil
@@ -11,7 +12,9 @@ import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from browser_use import Agent, Browser, ChatOpenAI, Tools
+from browser_use import Agent, Browser, ChatOpenAI, ChatOllama, Tools
+from browser_use.llm.base import BaseChatModel
+from browser_use.agent.views import ActionResult
 from browser_use.browser.events import NavigateToUrlEvent
 from browser_use.llm.messages import SystemMessage, UserMessage
 
@@ -60,29 +63,15 @@ def ensure_profile_copy_if_requested() -> tuple[str, str]:
         return env("CHROME_USER_DATA_DIR"), prof
 
 # --------- LLM clients ---------
-def make_local_llm() -> ChatOpenAI:
-    """Optimized local LLM configuration for Mistral NeMo 12B Instruct"""
-    # OpenAI-compatible local endpoint (e.g., Ollama, LM Studio). Default to Ollama.
-    base_url = env("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    # Q4_K_M quantization for 16GB machines
-    model = env("OLLAMA_MODEL", "mistral-nemo:12b-instruct-2407-q4_k_m")
-    api_key = env("OLLAMA_API_KEY", "ollama")  # placeholder to satisfy OpenAI-compatible signature
-
-    # Note: Some local OpenAI-compatible servers may ignore response_format JSON schema.
-    # To improve reliability, add_schema_to_system_prompt=True so the schema is also present in the prompt.
-    return ChatOpenAI(
+def make_local_llm() -> BaseChatModel:
+    """Optimized local LLM configuration for Qwen2.5 14B via Ollama."""
+    # Native Ollama client is more reliable for structured output than OpenAI-compatible shim
+    host = env("OLLAMA_HOST", "http://localhost:11434")
+    model = env("OLLAMA_MODEL", "qwen2.5:14b-instruct-q4_k_m")
+    return ChatOllama(
         model=model,
-        base_url=base_url,
-        api_key=api_key,
-        timeout=120,                  # Larger models need more time
-        temperature=0.2,              # Consistent JSON/action output
-        max_completion_tokens=4096,   # 4k context
-        frequency_penalty=0.2,        # Reduce repetitive actions
-        top_p=0.95,
-        add_schema_to_system_prompt=True,
-        # Stop sequences to prevent extra text past JSON in unstructured calls.
-        # These are NOT sent for reasoning models and NOT sent when using structured output.
-        stop=["\n```", "\nAssistant:", "\nObservation:", "\nActions:"],
+        host=host,
+        timeout=180,  # 14B quant on 16GB needs generous timeout
     )
 
 def make_o3_llm() -> ChatOpenAI:
@@ -123,13 +112,13 @@ PLANNER_SYSTEM = (
     "STRATEGIC GUIDANCE:\n"
     "- For information gathering: Prefer web_search (Serper API) to discover authoritative sources quickly.\n"
     "- For interactive tasks: Use web_search to find the right destination, then navigate to that site and interact there (avoid interacting on SERP).\n"
-    "- For complex workflows: Break into 2-4 comprehensive subtasks (not micro-steps)\n"
-    "- Each subtask should accomplish a meaningful milestone\n"
-    "- The local LLM executor is capable - trust it to handle multi-step actions within a subtask\n\n"
+    "- Subtask scope: Keep each subtask to 2–4 atomic actions on a single site (avoid multi-site subtasks).\n"
+    "- Each subtask should achieve a clear milestone with verifiable on-page evidence.\n"
+    "- The local executor is capable but resource-constrained—favor smaller, well-bounded steps.\n\n"
     
     "SUBTASK QUALITY:\n"
     "- Title: Clear, descriptive action (e.g., 'Search and analyze San Francisco weather')\n"
-    "- Instructions: Detailed steps including what tools to use when appropriate\n"
+    "- Instructions: Detailed steps including what tools to use when appropriate; keep actions on one target site.\n"
     "- Success: Specific, measurable outcome that validates completion\n\n"
     
     "Given the user GOAL, create an optimal plan that leverages both API tools and browser automation intelligently. "
@@ -137,7 +126,7 @@ PLANNER_SYSTEM = (
 )
 
 CRITIC_SYSTEM = (
-    "You are an expert critic analyzing browser automation failures. The executor uses Qwen2.5-7B locally.\n\n"
+    "You are an expert critic analyzing browser automation failures. The executor uses a local Qwen2.5-14B model via Ollama.\n\n"
     
     "COMMON FAILURE PATTERNS:\n"
     "- Malformed JSON output or corrupted responses\n"
@@ -222,6 +211,113 @@ def build_tools() -> Tools:
 
     return tools
 
+
+def build_tools_for_subtask(title: str, instructions: str, success_crit: str) -> Tools:
+    """Create a Tools instance with:
+    - web_search that sets a usage flag
+    - a guarded done action that validates success criteria heuristically
+    """
+    from browser_use.tools.views import DoneAction
+    from browser_use.browser.views import BrowserStateSummary
+    from browser_use.utils import is_new_tab_page
+
+    SERPER_KEY = env("SERPER_API_KEY")
+
+    # Exclude default 'done' so we can register our guarded version under the same name
+    tools = Tools(exclude_actions=["done"])  # keep all other actions
+
+    # Simple tool usage tracking across this subtask
+    usage = {"web_search_used": False}
+
+    @tools.action(description="Google search via Serper API - fast information gathering. Use for research, current data, facts. Returns structured JSON with results. Prefer this over browser search for pure information tasks.")
+    def web_search(query: str, num_results: int = 6) -> str:
+        usage["web_search_used"] = True
+        if not SERPER_KEY:
+            return json.dumps({"error": "SERPER_API_KEY not set"})
+        try:
+            payload = {"q": query, "num": max(1, min(int(num_results), 10))}
+            headers = {"X-API-KEY": SERPER_KEY, "Content-Type": "application/json"}
+            r = httpx.post("https://google.serper.dev/search", headers=headers, json=payload, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            def pick(it):
+                return {k: it.get(k) for k in ("title", "link", "snippet")}
+            results = [pick(x) for x in (data.get("organic", []) or [])]
+            return json.dumps({"query": query, "results": results[:payload["num"]]})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    # Guarded done: only allow completing when basic success checks pass
+    @tools.action(
+        description=(
+            "Complete task - summary to user. Set success=True only when success criteria are met. "
+            "If criteria are not met, this returns an error and you must continue."
+        ),
+        param_model=DoneAction,
+    )
+    async def done(params: DoneAction, browser_session) -> Any:  # type: ignore
+        # Acquire current page context for validation
+        try:
+            summary: BrowserStateSummary = await browser_session.get_browser_state_summary(
+                cache_clickable_elements_hashes=False, include_screenshot=False
+            )
+            url = (summary.url or "").lower()
+            title_l = (summary.title or "").lower()
+            page_text = summary.dom_state.llm_representation(include_attributes=None).lower() if summary.dom_state else ""
+        except Exception as e:
+            # If we cannot inspect the page, be conservative and prevent early completion
+            err = f"Cannot complete yet: failed to inspect page state ({type(e).__name__}: {e})"
+            return ActionResult(error=err, long_term_memory=err)
+
+        # Normalize inputs
+        instr_l = (instructions or "").lower()
+        succ_l = (success_crit or "").lower()
+        title_lhs = (title or "").lower()
+
+        # Generic guardrails
+        if not url or url.startswith("about:") or url.startswith("chrome://") or is_new_tab_page(url):
+            err = "Cannot complete: not on a meaningful page yet"
+            return ActionResult(error=err, long_term_memory=err)
+
+        # Generic heuristics derived from subtask goal
+        def mentions(term: str) -> bool:
+            t = term.lower()
+            return t in instr_l or t in succ_l or t in title_lhs
+
+        # Require using web_search for discovery tasks
+        if mentions("search") or mentions("find"):
+            if not usage["web_search_used"]:
+                err = "Use web_search to discover the correct destination before completing"
+                return ActionResult(error=err, long_term_memory=err)
+
+        # If the subtask references a specific domain, ensure we are on it
+        domain_pattern = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b")
+        referenced_domains = set(domain_pattern.findall(instr_l + " " + succ_l + " " + title_lhs))
+        if referenced_domains:
+            if not any(d in url for d in referenced_domains):
+                return ActionResult(error="Navigate to the referenced domain before completing", long_term_memory="Destination domain not reached")
+
+        # Map success criteria keywords to on-page evidence
+        def extract_keywords(text: str) -> set[str]:
+            words = re.findall(r"[a-zA-Z0-9]{5,}", text.lower())
+            return set(words[:20])  # cap for efficiency
+
+        success_keywords = extract_keywords(succ_l)
+        if success_keywords:
+            if not any(k in page_text or k in title_l for k in success_keywords):
+                return ActionResult(error="On-page evidence for success criteria not found yet", long_term_memory="Continue actions toward criteria")
+
+        # If success=False, allow early termination but keep transparency
+        if params.success is False:
+            memory = f'Task ended without success: {params.text[:100]}'
+            return ActionResult(is_done=True, success=False, extracted_content=params.text, long_term_memory=memory)
+
+        # Passed validations -> allow completion
+        memory = f'Task completed: {params.text[:100]}'
+        return ActionResult(is_done=True, success=True, extracted_content=params.text, long_term_memory=memory)
+
+    return tools
+
 # --------- Browser factory ---------
 def make_browser() -> Browser:
     exe = env("CHROME_EXECUTABLE", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -246,8 +342,8 @@ class RunConfig(BaseModel):
     max_failures_per_subtask: int = 2
     step_timeout_sec: int = 120
 
-async def run_one_subtask(local_llm: ChatOpenAI, browser: Browser, tools: Tools,
-                          title: str, instructions: str, cfg: RunConfig,
+async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Tools,
+                          title: str, instructions: str, success_crit: str, cfg: RunConfig,
                           injected_state=None, progress_context: str = "") -> tuple[str, Any]:
     """
     Try locally first. If we fail/stall, escalate once to cloud (o3) for this subtask only, then de-escalate.
@@ -266,7 +362,9 @@ async def run_one_subtask(local_llm: ChatOpenAI, browser: Browser, tools: Tools,
         "- Choose the most efficient approach - API for data, browser for interaction\n"
         "- Work methodically but efficiently toward the success criteria\n"
         "- Combine multiple related actions when logical\n"
-        "- Only call 'done' when you have definitively achieved the success condition\n\n"
+        "- Do NOT call 'done' until you meet the success criteria and can cite evidence from the current page.\n\n"
+        f"SUCCESS CRITERIA (checklist):\n{success_crit}\n\n"
+        "When finishing, include a brief evidence note in your summary (e.g., URL and key on-page text).\n\n"
         
         "Stay focused on this specific subtask and complete it thoroughly before stopping."
     )
@@ -295,27 +393,37 @@ async def run_one_subtask(local_llm: ChatOpenAI, browser: Browser, tools: Tools,
             except Exception as e:
                 log(f"[health] NavigateToUrlEvent failed to restore focus: {e}")
 
-    async def _attempt(llm: ChatOpenAI, tag: str):
+    async def _attempt(llm: BaseChatModel, tag: str):
         # Optimize agent config based on model type
-        is_local = "ollama" in llm.base_url if hasattr(llm, 'base_url') and llm.base_url else False
+        provider = getattr(llm, 'provider', '')
+        is_local = provider == 'ollama'
+        # Fallback heuristic for OpenAI-compatible local endpoints
+        if not is_local and hasattr(llm, 'base_url') and getattr(llm, 'base_url', None):
+            burl = str(llm.base_url).lower()
+            is_local = ('localhost' in burl) or ('127.0.0.1' in burl)
         # Proactively ensure browser session is healthy/focused before each attempt
         await _ensure_browser_ready(f"attempt:{tag}")
+
+        # Per-subtask tools with guarded 'done'
+        subtask_tools = build_tools_for_subtask(title=title, instructions=instructions, success_crit=success_crit)
 
         agent = Agent(
             task=title,
             llm=llm,
-            tools=tools,
+            tools=subtask_tools,
             browser=browser,
             extend_system_message=(extend_msg + ("\n\nPRIOR PROGRESS:\n" + progress_context if progress_context else "")),
             max_failures=cfg.max_failures_per_subtask,
             step_timeout=cfg.step_timeout_sec,
             page_extraction_llm=local_llm,  # Always use local for cost efficiency
             # Optimal settings based on testing
-            use_thinking=is_local,  # Enable reasoning for local model
+            # For small/medium local models, disable chain-of-thought to reduce verbosity
+            use_thinking=False if is_local else True,
             use_vision=False,  # Reduce processing load  
-            max_actions_per_step=6 if is_local else 8,  # Balanced action grouping
-            max_history_items=15 if is_local else 20,  # Appropriate context window
+            max_actions_per_step=4 if is_local else 8,  # Keep local steps atomic
+            max_history_items=12 if is_local else 20,  # Smaller context for local models
             flash_mode=False,  # Keep standard mode for reliability
+            include_tool_call_examples=True,
             # Continuity settings
             injected_agent_state=injected_state,
             include_recent_events=True,
@@ -398,7 +506,9 @@ async def main(goal: str):
 
     # Log configuration for transparency
     log(f"🎯 Goal: {goal}")
-    log(f"🤖 Local model: {local_llm.model} (temp={local_llm.temperature}, timeout={local_llm.timeout}s)")
+    temp = getattr(local_llm, 'temperature', None)
+    timeout = getattr(local_llm, 'timeout', None)
+    log(f"🤖 Local model: {local_llm.model} (temp={temp}, timeout={timeout}s)")
     log(f"☁️  Cloud model: {env('OPENAI_MODEL', 'o3')} for planning/critic")
     log(f"⚙️  Config: max_failures={cfg.max_failures_per_subtask}, step_timeout={cfg.step_timeout_sec}s")
     log("🖥️  Browser keep_alive: True (persist across subtasks)")
@@ -428,7 +538,7 @@ async def main(goal: str):
         # Build continuity context from prior progress
         progress_context = "\n".join(progress_notes[-5:])  # keep last 5 notes
         result, shared_state = await run_one_subtask(
-            local_llm, browser, tools, title, instructions, cfg,
+            local_llm, browser, tools, title, instructions, success_crit, cfg,
             injected_state=shared_state, progress_context=progress_context,
         )
         # Record succinct note for next steps

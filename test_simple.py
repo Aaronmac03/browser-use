@@ -1,36 +1,52 @@
 #!/usr/bin/env python3
 
 import asyncio
-import sys
-from browser_use import Agent, Browser, ChatOpenAI
 from dotenv import load_dotenv
+from runner import make_browser, make_local_llm, build_tools_for_subtask
+from browser_use import Agent
 
-load_dotenv()
-
-async def simple_test():
-    # Use cloud model for this simple test
-    llm = ChatOpenAI(model="o3-mini")  # Faster and cheaper than o3
+async def test_simple():
+    load_dotenv()
     
-    # Use the copied profile since it worked
-    browser = Browser(
-        user_data_dir="./runtime/user_data",
-        profile_directory="Default", 
-        headless=False
-    )
+    # Test just the first subtask with a simpler approach
+    browser = make_browser()
+    local_llm = make_local_llm()
     
-    agent = Agent(
-        task="Navigate to Google.com and search for 'browser-use python' and take a screenshot",
-        llm=llm,
-        browser=browser,
-        max_failures=3,
-        step_timeout=60  # Shorter timeout for quick test
-    )
+    title = "Navigate to Walmart.com"
+    instructions = "Simply navigate to https://www.walmart.com and confirm the page loads"
+    success_crit = "The page shows Walmart branding and the main navigation"
     
-    print("🚀 Starting simple test...")
-    result = await agent.run()
-    print(f"✅ Test completed: {result}")
+    tools = build_tools_for_subtask(title, instructions, success_crit)
     
-    return result
+    try:
+        await browser.start()
+        print("Browser started successfully")
+        
+        agent = Agent(
+            task=title,
+            llm=local_llm,
+            tools=tools,
+            browser=browser,
+            max_failures=2,
+            step_timeout=60,
+            max_actions_per_step=3,
+            use_vision=False,
+            flash_mode=False,
+        )
+        
+        print("Starting agent...")
+        result = await agent.run()
+        print(f"Result: {result}")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        try:
+            await browser.kill()
+        except:
+            pass
 
 if __name__ == "__main__":
-    asyncio.run(simple_test())
+    asyncio.run(test_simple())

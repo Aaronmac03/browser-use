@@ -354,8 +354,8 @@ class DomService:
 			'device_pixel_ratio': asyncio.create_task(self._get_viewport_ratio(target_id)),
 		}
 
-		# Wait for all tasks with timeout
-		done, pending = await asyncio.wait(tasks.values(), timeout=10.0)
+		# Wait for all tasks with timeout (slightly higher to reduce flaky timeouts on slower pages)
+		done, pending = await asyncio.wait(tasks.values(), timeout=15.0)
 
 		# Retry any failed or timed out tasks
 		if pending:
@@ -376,7 +376,7 @@ class DomService:
 					tasks[key] = retry_map[task]()
 
 			# Wait again with shorter timeout
-			done2, pending2 = await asyncio.wait([t for t in tasks.values() if not t.done()], timeout=2.0)
+			done2, pending2 = await asyncio.wait([t for t in tasks.values() if not t.done()], timeout=5.0)
 
 			if pending2:
 				for task in pending2:
