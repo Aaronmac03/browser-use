@@ -67,11 +67,12 @@ def make_local_llm() -> BaseChatModel:
     """Optimized local LLM configuration for Qwen2.5 14B via Ollama."""
     # Native Ollama client is more reliable for structured output than OpenAI-compatible shim
     host = env("OLLAMA_HOST", "http://localhost:11434")
-    model = env("OLLAMA_MODEL", "qwen2.5:14b-instruct-q2_k")
+    # Default to 14B model for better web navigation capabilities
+    model = env("OLLAMA_MODEL", "qwen2.5:14b-instruct-q4_k_m")
     return ChatOllama(
         model=model,
         host=host,
-        timeout=180,  # 14B quant on 16GB needs generous timeout
+        timeout=240,  # Increased timeout for 14B model reliability
     )
 
 def make_o3_llm() -> ChatOpenAI:
@@ -328,8 +329,47 @@ def make_browser() -> Browser:
             keep_alive=True,
         )
 
-    exe = env("CHROME_EXECUTABLE", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    # Try multiple browser executables in order of preference
+    possible_executables = [
+        env("CHROME_EXECUTABLE"),
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+    ]
+    
+    exe = None
+    for candidate in possible_executables:
+        if candidate and Path(candidate).exists():
+            exe = candidate
+            log(f"Using browser executable: {exe}")
+            break
+    
+    if not exe:
+        raise RuntimeError("No suitable browser executable found. Install Chrome or Chromium.")
+
     user_dir, prof = ensure_profile_copy_if_requested()
+    
+    # Enhanced browser args for stability
+    browser_args = [
+        "--disable-features=OptimizationGuideModelDownloading",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-ipc-flooding-protection",
+        "--disable-hang-monitor",
+        "--disable-prompt-on-repost",
+        "--disable-sync",
+        "--disable-translate",
+        "--disable-default-apps",
+        "--disable-extensions-except",
+        "--disable-component-extensions-with-background-pages",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-dev-shm-usage",  # Helps with stability on some systems
+        "--disable-gpu-sandbox",    # Can help with CDP issues
+    ]
+    
     # We avoid allowed_domains entirely (per your request).
     # Notes:
     # - If Chrome refuses to start with your system profile (Chrome >=136), set COPY_PROFILE_ONCE=1.
@@ -341,8 +381,7 @@ def make_browser() -> Browser:
         headless=False,
         devtools=False,
         keep_alive=True,  # Persist browser across subtasks to maintain session/focus
-        # You can pass additional flags if needed:
-        # args=["--disable-features=OptimizationGuideModelDownloading", "--disable-renderer-backgrounding"]
+        args=browser_args,
     )
 
 # --------- Runner ---------
@@ -378,28 +417,59 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
     )
 
     async def _ensure_browser_ready(reason: str) -> None:
-        """Ensure browser is started and focused on a usable tab."""
-        try:
-            await browser.start()
-        except Exception as e:
-            log(f"[health] Browser.start failed ({reason}): {e}")
-            # Try a hard reset if start fails
+        """Ensure browser is started and focused on a usable tab with enhanced health checks."""
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                await browser.kill()
                 await browser.start()
-            except Exception as e2:
-                log(f"[health] Browser hard reset failed: {e2}")
-                raise
-
-        # Fallback: if focus is somehow missing, open a blank tab to force focus
-        if not getattr(browser, 'agent_focus', None):
-            log("[health] No agent_focus after start; opening about:blank to establish focus")
-            ev = browser.event_bus.dispatch(NavigateToUrlEvent(url='about:blank', new_tab=True))
-            try:
-                await ev
-                await ev.event_result(raise_if_any=True, raise_if_none=False)
+                
+                # Wait a moment for browser to fully initialize
+                await asyncio.sleep(2)
+                
+                # Test basic browser functionality with a simple health check
+                try:
+                    # Try to get current page info - this will fail if CDP is broken
+                    from browser_use.browser.events import BrowserStateRequestEvent
+                    health_event = browser.event_bus.dispatch(BrowserStateRequestEvent())
+                    await asyncio.wait_for(health_event, timeout=10)
+                    log(f"[health] Browser health check passed (attempt {attempt + 1})")
+                    break
+                except Exception as health_e:
+                    log(f"[health] Browser health check failed (attempt {attempt + 1}): {health_e}")
+                    if attempt < max_retries - 1:
+                        await browser.kill()
+                        await asyncio.sleep(3)  # Wait before retry
+                        continue
+                    else:
+                        raise health_e
+                        
             except Exception as e:
-                log(f"[health] NavigateToUrlEvent failed to restore focus: {e}")
+                log(f"[health] Browser.start failed ({reason}, attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    # Try progressively more aggressive recovery
+                    try:
+                        if attempt == 0:
+                            await browser.stop()  # Gentle stop first
+                        else:
+                            await browser.kill()  # Hard kill on subsequent attempts
+                        await asyncio.sleep(3)
+                    except Exception as cleanup_e:
+                        log(f"[health] Cleanup failed: {cleanup_e}")
+                else:
+                    raise RuntimeError(f"Browser failed to start after {max_retries} attempts") from e
+
+        # Ensure we have a usable tab - navigate to a simple page if needed
+        try:
+            # Check if we have focus, if not establish it
+            if not getattr(browser, 'agent_focus', None):
+                log("[health] No agent_focus after start; navigating to about:blank to establish focus")
+                ev = browser.event_bus.dispatch(NavigateToUrlEvent(url='about:blank', new_tab=False))
+                await asyncio.wait_for(ev, timeout=15)
+                await ev.event_result(raise_if_any=True, raise_if_none=False)
+                await asyncio.sleep(1)  # Let navigation settle
+        except Exception as e:
+            log(f"[health] Focus establishment failed: {e}")
+            # Don't fail here - the agent might still work
 
     async def _attempt(llm: BaseChatModel, tag: str):
         # Optimize agent config based on model type
@@ -415,6 +485,17 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
         # Per-subtask tools with guarded 'done'
         subtask_tools = build_tools_for_subtask(title=title, instructions=instructions, success_crit=success_crit)
 
+        # Enhanced configuration for 14B model reliability
+        if is_local:
+            # 14B model can handle more complexity than 7B
+            max_actions = 6  # Increased from 4 for 14B
+            max_history = 16  # Increased from 12 for 14B
+            use_thinking_mode = True  # Enable for 14B model
+        else:
+            max_actions = 8
+            max_history = 20
+            use_thinking_mode = True
+
         agent = Agent(
             task=title,
             llm=llm,
@@ -424,40 +505,78 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
             max_failures=cfg.max_failures_per_subtask,
             step_timeout=cfg.step_timeout_sec,
             page_extraction_llm=local_llm,  # Always use local for cost efficiency
-            # Optimal settings based on testing
-            # For small/medium local models, disable chain-of-thought to reduce verbosity
-            use_thinking=False if is_local else True,
-            use_vision=False,  # Reduce processing load  
-            max_actions_per_step=4 if is_local else 8,  # Keep local steps atomic
-            max_history_items=12 if is_local else 20,  # Smaller context for local models
+            # Optimized settings for 14B model
+            use_thinking=use_thinking_mode,
+            use_vision=False,  # Keep disabled for performance
+            max_actions_per_step=max_actions,
+            max_history_items=max_history,
             flash_mode=False,  # Keep standard mode for reliability
             include_tool_call_examples=True,
             # Continuity settings
             injected_agent_state=injected_state,
             include_recent_events=True,
             directly_open_url=True,
+            # Enhanced reliability settings
+            retry_on_failure=True,
+            validate_output=True,
         )
         log(f"[{tag}] starting agent for subtask: {title}")
         result = await agent.run()
         return agent, result
 
     async def _recover_session(reason: str) -> None:
-        """Try to recover the browser session gracefully, then forcefully."""
+        """Try to recover the browser session with progressive escalation."""
+        log(f"[recovery] Starting browser session recovery after: {reason}")
+        
+        # Step 1: Try gentle recovery (just restart)
         try:
-            log(f"[recovery] Attempting graceful browser session recovery after: {reason}")
-            await browser.stop()  # keep process if possible
+            log("[recovery] Attempting gentle recovery (restart)")
+            await browser.stop()
+            await asyncio.sleep(2)  # Let processes clean up
             await browser.start()
-            log("[recovery] Graceful recovery succeeded")
+            await asyncio.sleep(3)  # Let browser initialize
+            
+            # Test if recovery worked
+            from browser_use.browser.events import BrowserStateRequestEvent
+            test_event = browser.event_bus.dispatch(BrowserStateRequestEvent())
+            await asyncio.wait_for(test_event, timeout=8)
+            log("[recovery] Gentle recovery succeeded")
             return
         except Exception as e1:
-            log(f"[recovery] Graceful recovery failed: {e1}. Trying hard reset...")
-            try:
-                await browser.kill()  # fully reset browser + event bus
-                await browser.start()
-                log("[recovery] Hard reset recovery succeeded")
-            except Exception as e2:
-                log(f"[recovery] Hard reset failed: {e2}")
-                raise
+            log(f"[recovery] Gentle recovery failed: {e1}")
+
+        # Step 2: Try hard reset (kill and restart)
+        try:
+            log("[recovery] Attempting hard reset (kill + restart)")
+            await browser.kill()
+            await asyncio.sleep(5)  # Longer wait for full cleanup
+            await browser.start()
+            await asyncio.sleep(3)
+            
+            # Test if recovery worked
+            test_event = browser.event_bus.dispatch(GetCurrentPageEvent())
+            await asyncio.wait_for(test_event, timeout=8)
+            log("[recovery] Hard reset recovery succeeded")
+            return
+        except Exception as e2:
+            log(f"[recovery] Hard reset failed: {e2}")
+
+        # Step 3: Final attempt with extended wait
+        try:
+            log("[recovery] Final recovery attempt with extended cleanup")
+            await browser.kill()
+            await asyncio.sleep(10)  # Extended wait for full cleanup
+            await browser.start()
+            await asyncio.sleep(5)  # Extended initialization wait
+            
+            # Test if recovery worked
+            test_event = browser.event_bus.dispatch(GetCurrentPageEvent())
+            await asyncio.wait_for(test_event, timeout=10)
+            log("[recovery] Final recovery attempt succeeded")
+            return
+        except Exception as e3:
+            log(f"[recovery] Final recovery attempt failed: {e3}")
+            raise RuntimeError(f"All recovery attempts failed. Last error: {e3}") from e3
 
     # 1) Local attempt
     try:
@@ -509,8 +628,8 @@ async def main(goal: str):
     tools = build_tools()
     browser = make_browser()
     local_llm = make_local_llm()
-    # Give complex retail flows a bit more breathing room
-    cfg = RunConfig(max_failures_per_subtask=3, step_timeout_sec=180)
+    # Enhanced configuration for 14B model and complex retail flows
+    cfg = RunConfig(max_failures_per_subtask=2, step_timeout_sec=240)  # Longer timeout for 14B model
 
     # Log configuration for transparency
     log(f"🎯 Goal: {goal}")
