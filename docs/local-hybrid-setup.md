@@ -99,3 +99,11 @@ This document summarizes what we changed, why we changed it, and how the pieces 
   - **Avoid**: Any Q2_K quantizations (too aggressive, poor reasoning quality)
 - Groq Llama 4 is a cost‑effective cloud escalation alternative if it fits your privacy constraints.
 - **Browser-use 0.7.1 requires the bug fixes** documented above for reliable operation.
+
+
+Key Insights for Complex Multi-Step Tasks
+7B model is optimal for web navigation (speed vs capability balance)
+Simple, focused steps work better than complex multi-action sequences
+Clear completion criteria are essential for local LLMs
+Element interaction reliability improved with text-based fallbacks
+Task-specific prompting significantly improves success rates

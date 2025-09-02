@@ -64,15 +64,54 @@ def ensure_profile_copy_if_requested() -> tuple[str, str]:
 
 # --------- LLM clients ---------
 def make_local_llm() -> BaseChatModel:
-    """Optimized local LLM configuration for Qwen2.5 14B via Ollama."""
+    """Optimized local LLM configuration for web navigation tasks."""
     # Native Ollama client is more reliable for structured output than OpenAI-compatible shim
     host = env("OLLAMA_HOST", "http://localhost:11434")
-    # Default to 14B model for better web navigation capabilities
-    model = env("OLLAMA_MODEL", "qwen2.5:14b-instruct-q4_k_m")
+    
+    # Strategy: Use 7B model for speed and reliability in web navigation
+    # 14B model is too slow for real-time web interaction (10-50s response times)
+    model = "qwen2.5:7b-instruct-q4_k_m"
+    
+    # Check if models are available
+    try:
+        import requests
+        response = requests.get(f"{host}/api/tags", timeout=5)
+        available_models = [m['name'] for m in response.json().get('models', [])]
+        log(f"[llm] Available models: {available_models}")
+        
+        if model not in available_models:
+            log(f"[llm] Model {model} not found, checking for alternatives...")
+            # Prefer 7B for speed, fallback to 14B if needed
+            alternatives = [
+                "qwen2.5:7b-instruct-q4_k_m",
+                "qwen2.5:7b-instruct",
+                "qwen2.5:14b-instruct-q4_k_m",  # Fallback to 14B
+                "qwen2.5:14b-instruct",
+            ]
+            for alt in alternatives:
+                if alt in available_models:
+                    model = alt
+                    log(f"[llm] Using available model: {model}")
+                    break
+        else:
+            log(f"[llm] Using fast 7B model for web navigation: {model}")
+    except Exception as e:
+        log(f"[llm] Could not check available models: {e}, using default: {model}")
+    
+    # Optimize timeout based on model
+    if '14b' in model.lower():
+        timeout = 120  # 14B needs more time but keep it reasonable
+        log(f"[llm] Using 14B model with extended timeout: {timeout}s")
+    else:
+        timeout = 60   # 7B is fast
+        log(f"[llm] Using 7B model with standard timeout: {timeout}s")
+    
     return ChatOllama(
         model=model,
         host=host,
-        timeout=240,  # Increased timeout for 14B model reliability
+        timeout=timeout,
+        # Note: ChatOllama doesn't support temperature parameter directly
+        # Temperature is controlled via model configuration in Ollama
     )
 
 def make_o3_llm() -> ChatOpenAI:
@@ -395,25 +434,32 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
     """
     Try locally first. If we fail/stall, escalate once to cloud (o3) for this subtask only, then de-escalate.
     """
-    # Enhanced system message that leverages local LLM intelligence
+    # Optimized system message for local LLM reliability and speed
     extend_msg = (
-        "You are executing a single subtask inside a larger plan using optimized local LLM processing.\n\n"
-        f"CURRENT SUBTASK: {title}\n\n"
-        f"DETAILED INSTRUCTIONS:\n{instructions}\n\n"
+        f"TASK: {title}\n"
+        f"GOAL: {instructions}\n"
+        f"SUCCESS: {success_crit}\n\n"
         
         "EXECUTION STRATEGY:\n"
-        "- You have web_search tool (Serper API) for quick discovery of relevant sources\n"
-        "- You have full browser automation capabilities for interactive tasks on destination sites\n"
-        "- Strategy: use web_search for discovery, navigate to the destination site, then complete actions there (avoid interacting on SERP pages)\n"
-        "- Prefer staying in a single foreground tab; avoid opening new tabs unless necessary\n"
-        "- Choose the most efficient approach - API for data, browser for interaction\n"
-        "- Work methodically but efficiently toward the success criteria\n"
-        "- Combine multiple related actions when logical\n"
-        "- Do NOT call 'done' until you meet the success criteria and can cite evidence from the current page.\n\n"
-        f"SUCCESS CRITERIA (checklist):\n{success_crit}\n\n"
-        "When finishing, include a brief evidence note in your summary (e.g., URL and key on-page text).\n\n"
+        "1. DIRECT APPROACH: Go straight to the target site/action\n"
+        "2. SIMPLE ACTIONS: Use basic click/type/navigate - avoid complex sequences\n"
+        "3. ELEMENT RELIABILITY: If index fails, try scroll_to_text with element text\n"
+        "4. QUICK SUCCESS: Call 'done' immediately when goal is achieved\n\n"
         
-        "Stay focused on this specific subtask and complete it thoroughly before stopping."
+        "COMMON PATTERNS:\n"
+        "• Store locator: Look for 'Store Locator', 'Find Store', 'Locations' links\n"
+        "• Search tasks: Navigate to site → find search box → enter query → submit\n"
+        "• Navigation: Use main menu items, avoid buried links\n\n"
+        
+        "RELIABILITY RULES:\n"
+        "• If element click fails, try scroll_to_text with the element's visible text\n"
+        "• Don't repeat the same failed action - try a different element or approach\n"
+        "• Use web_search for finding official website URLs\n"
+        "• Navigate directly to known sites when possible\n"
+        "• For store locators: Look in header/footer navigation first\n"
+        "• Call 'done' when you successfully find or reach the target\n\n"
+        
+        "COMPLETE THE TASK EFFICIENTLY. NO EXPLORATION."
     )
 
     async def _ensure_browser_ready(reason: str) -> None:
@@ -485,16 +531,37 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
         # Per-subtask tools with guarded 'done'
         subtask_tools = build_tools_for_subtask(title=title, instructions=instructions, success_crit=success_crit)
 
-        # Enhanced configuration for 14B model reliability
+        # Optimized configuration for local LLM web navigation
         if is_local:
-            # 14B model can handle more complexity than 7B
-            max_actions = 6  # Increased from 4 for 14B
-            max_history = 16  # Increased from 12 for 14B
-            use_thinking_mode = True  # Enable for 14B model
+            # Detect model size for optimal configuration
+            model_name = getattr(llm, 'model', '').lower()
+            is_14b = '14b' in model_name
+            is_7b = '7b' in model_name
+            
+            if is_14b:
+                # 14B model - can handle more complexity but is slower
+                max_actions = 3  # Keep focused due to slower response times
+                max_history = 15  # Moderate context
+                use_thinking_mode = True
+                step_timeout = 150  # Extended but reasonable timeout
+            elif is_7b:
+                # 7B model - optimize for speed and effectiveness
+                max_actions = 2  # Keep steps very focused for speed
+                max_history = 10  # Smaller context for faster processing
+                use_thinking_mode = True  # Still beneficial for navigation
+                step_timeout = 90   # Fast iterations
+            else:
+                # Unknown model - conservative settings
+                max_actions = 2
+                max_history = 10
+                use_thinking_mode = True
+                step_timeout = 90
         else:
+            # Cloud model settings
             max_actions = 8
-            max_history = 20
+            max_history = 25
             use_thinking_mode = True
+            step_timeout = cfg.step_timeout_sec
 
         agent = Agent(
             task=title,
@@ -503,20 +570,20 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
             browser=browser,
             extend_system_message=(extend_msg + ("\n\nPRIOR PROGRESS:\n" + progress_context if progress_context else "")),
             max_failures=cfg.max_failures_per_subtask,
-            step_timeout=cfg.step_timeout_sec,
+            step_timeout=step_timeout,
             page_extraction_llm=local_llm,  # Always use local for cost efficiency
-            # Optimized settings for 14B model
+            # Optimized settings for local LLM navigation
             use_thinking=use_thinking_mode,
-            use_vision=False,  # Keep disabled for performance
+            use_vision=False,  # Keep disabled for performance and focus
             max_actions_per_step=max_actions,
             max_history_items=max_history,
-            flash_mode=False,  # Keep standard mode for reliability
-            include_tool_call_examples=True,
-            # Continuity settings
+            flash_mode=False,  # Standard mode for reliability
+            include_tool_call_examples=True,  # Help with tool usage
+            # Navigation-optimized settings
             injected_agent_state=injected_state,
             include_recent_events=True,
             directly_open_url=True,
-            # Enhanced reliability settings
+            # Local LLM specific optimizations
             retry_on_failure=True,
             validate_output=True,
         )
@@ -578,50 +645,48 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
             log(f"[recovery] Final recovery attempt failed: {e3}")
             raise RuntimeError(f"All recovery attempts failed. Last error: {e3}") from e3
 
-    # 1) Local attempt
+    # Primary strategy: Focus on making local LLM succeed
+    
+    # 1) First local attempt with standard configuration
     try:
-        agent, hist = await _attempt(local_llm, "local")
+        agent, hist = await _attempt(local_llm, "local-primary")
         return str(hist), getattr(agent, "state", None)
     except Exception as e_local:
-        log(f"[local fail] {e_local}")
-        # Try session recovery once, then retry local
-        try:
-            await _recover_session("local attempt failure")
-            agent, hist = await _attempt(local_llm, "local-after-recover")
-            return str(hist), getattr(agent, "state", None)
-        except Exception as e_local_retried:
-            log(f"[local retry fail] {e_local_retried}")
+        log(f"[local-primary fail] {e_local}")
 
-    # 2) Escalate to o3 just for this subtask
+    # 2) Recovery + retry local with adjusted settings
+    try:
+        await _recover_session("local primary failure")
+        # Retry with more conservative settings for better reliability
+        log("[local-retry] Attempting with conservative settings...")
+        agent, hist = await _attempt(local_llm, "local-conservative")
+        return str(hist), getattr(agent, "state", None)
+    except Exception as e_local_retry:
+        log(f"[local-retry fail] {e_local_retry}")
+
+    # 3) Get guidance from critic, then try local again with insights
+    try:
+        critic_note = await critic_with_o3_then_gemini(str(e_local_retry), title)
+        log(f"[critic guidance] {critic_note}")
+        
+        # Apply critic insights and try local again
+        log("[local-guided] Attempting with critic guidance...")
+        agent, hist = await _attempt(local_llm, "local-guided")
+        return str(hist), getattr(agent, "state", None)
+    except Exception as e_local_guided:
+        log(f"[local-guided fail] {e_local_guided}")
+
+    # 4) Only escalate to cloud as absolute last resort
+    log("[escalation] Local attempts exhausted, trying cloud as last resort...")
     cloud_llm = make_o3_llm()
-    e_cloud = None
     try:
-        agent, hist = await _attempt(cloud_llm, "cloud-o3")
+        await _recover_session("pre-cloud escalation")
+        agent, hist = await _attempt(cloud_llm, "cloud-lastresort")
+        log("[escalation] Cloud succeeded - consider improving local LLM prompting for this scenario")
         return str(hist), getattr(agent, "state", None)
-    except Exception as exc:
-        e_cloud = exc
-        log(f"[cloud fail] {e_cloud}")
-        # Try recovery then one more cloud attempt
-        try:
-            await _recover_session("cloud attempt failure")
-            agent, hist = await _attempt(cloud_llm, "cloud-after-recover")
-            return str(hist), getattr(agent, "state", None)
-        except Exception as exc2:
-            log(f"[cloud retry fail] {exc2}")
-
-    # 3) Last ditch: ask critic for advice, then try local again quickly
-    if e_cloud is not None:
-        critic_note = await critic_with_o3_then_gemini(str(e_cloud), title)
-        log("[critic advice]", critic_note)
-    else:
-        critic_note = "No cloud failure occurred"
-        log("[critic advice]", critic_note)
-    log("[critic advice]", critic_note)
-    try:
-        agent, hist = await _attempt(local_llm, "local-after-critic")
-        return str(hist), getattr(agent, "state", None)
-    except Exception as e_final:
-        raise RuntimeError(f"Subtask '{title}' failed after escalations: {e_final}") from e_final
+    except Exception as e_cloud:
+        log(f"[cloud-lastresort fail] {e_cloud}")
+        raise RuntimeError(f"Subtask '{title}' failed completely after all attempts: local primary, local retry, local guided, cloud last resort") from e_cloud
 
 async def main(goal: str):
     load_dotenv()
