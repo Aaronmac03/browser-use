@@ -1516,8 +1516,16 @@ class DefaultActionWatchdog(BaseWatchdog):
 			raise BrowserError('CDP session not initialized - browser may not be connected yet')
 		session_id = self.browser_session.agent_focus.session_id
 
-		# Enable DOM
-		await cdp_client.send.DOM.enable(session_id=session_id)
+		try:
+			# Enable DOM
+			await cdp_client.send.DOM.enable(session_id=session_id)
+		except Exception as e:
+			# Handle session disconnection gracefully
+			if 'Session with given id not found' in str(e) or 'not found' in str(e).lower():
+				self.logger.warning(f'⚠️ CDP session lost during scroll_to_text for "{event.text}" - browser may have navigated')
+				raise BrowserError(f'Text not found: "{event.text}" (session disconnected)', details={'text': event.text})
+			else:
+				raise
 
 		# Get document
 		doc = await cdp_client.send.DOM.getDocument(params={'depth': -1}, session_id=session_id)
@@ -1587,12 +1595,12 @@ class DefaultActionWatchdog(BaseWatchdog):
 				session_id=session_id,
 			)
 
-		if js_result.get('result', {}).get('value'):
-			self.logger.debug(f'📜 Scrolled to text: "{event.text}" (via JS)')
-			return None
-		else:
-			self.logger.warning(f'⚠️ Text not found: "{event.text}"')
-			raise BrowserError(f'Text not found: "{event.text}"', details={'text': event.text})
+			if js_result.get('result', {}).get('value'):
+				self.logger.debug(f'📜 Scrolled to text: "{event.text}" (via JS)')
+				return None
+			else:
+				self.logger.warning(f'⚠️ Text not found: "{event.text}"')
+				raise BrowserError(f'Text not found: "{event.text}"', details={'text': event.text})
 
 		# If we got here and found is True, return None (success)
 		if found:

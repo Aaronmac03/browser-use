@@ -67,7 +67,7 @@ def make_local_llm() -> BaseChatModel:
     """Optimized local LLM configuration for Qwen2.5 14B via Ollama."""
     # Native Ollama client is more reliable for structured output than OpenAI-compatible shim
     host = env("OLLAMA_HOST", "http://localhost:11434")
-    model = env("OLLAMA_MODEL", "qwen2.5:14b-instruct-q4_k_m")
+    model = env("OLLAMA_MODEL", "qwen2.5:14b-instruct-q2_k")
     return ChatOllama(
         model=model,
         host=host,
@@ -320,6 +320,14 @@ def build_tools_for_subtask(title: str, instructions: str, success_crit: str) ->
 
 # --------- Browser factory ---------
 def make_browser() -> Browser:
+    # Prefer existing Chrome with remote debugging if provided
+    cdp_url = env("CDP_URL")
+    if cdp_url:
+        return Browser(
+            cdp_url=cdp_url,
+            keep_alive=True,
+        )
+
     exe = env("CHROME_EXECUTABLE", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
     user_dir, prof = ensure_profile_copy_if_requested()
     # We avoid allowed_domains entirely (per your request).
