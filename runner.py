@@ -12,7 +12,7 @@ import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from browser_use import Agent, Browser, ChatOpenAI, ChatOllama, Tools
+from browser_use import Agent, Browser, ChatOpenAI, ChatLlamaCpp, Tools
 from browser_use.llm.base import BaseChatModel
 from browser_use.agent.views import ActionResult
 from browser_use.browser.events import NavigateToUrlEvent
@@ -25,6 +25,35 @@ def env(key: str, default: Optional[str] = None) -> Optional[str]:
 
 def log(*args):
     print("[runner]", *args, flush=True)
+
+def redact_page_content(text: str) -> str:
+    """
+    Redact potentially sensitive page content before sending to cloud LLMs.
+    Strips HTML tags, removes base64-like content, and truncates long tokens.
+    """
+    if not text:
+        return text
+    
+    import re
+    
+    # Remove HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    # Split into tokens and handle long ones first (before base64 regex)
+    tokens = text.split()
+    redacted_tokens = []
+    for token in tokens:
+        if len(token) > 200:
+            redacted_tokens.append('[REDACTED_LONG_TOKEN]')
+        else:
+            redacted_tokens.append(token)
+    
+    text = ' '.join(redacted_tokens)
+    
+    # Remove base64-like strings (long alphanumeric sequences with base64 characteristics)
+    text = re.sub(r'\b[A-Za-z0-9+/]{50,}={0,2}\b', '[REDACTED_BASE64]', text)
+    
+    return text
 
 # Chrome profile copy helper (helps avoid Chrome v136 default-profile CDP block)
 def ensure_profile_copy_if_requested() -> tuple[str, str]:
@@ -51,11 +80,28 @@ def ensure_profile_copy_if_requested() -> tuple[str, str]:
             log(f"Profile copy exists: {dst_profile_path} (skipping copy)")
         else:
             log(f"Copying Chrome profile '{prof}' from {src_profile_path} -> {dst_profile_path}")
-            # Copy but ignore heavy caches for speed/space
+            # Copy but ignore heavy caches and locked files for speed/space and avoid permission errors
             def _ignore(dir, names):
-                blacklist = {"Cache", "Code Cache", "Service Worker", "Default/Network", "Crashpad", "GrShaderCache"}
-                return [n for n in names if n in blacklist]
-            shutil.copytree(src_profile_path, dst_profile_path, ignore=_ignore)
+                blacklist = {
+                    "Cache", "Code Cache", "Service Worker", "Default/Network", "Crashpad", "GrShaderCache",
+                    "DawnGraphiteCache", "DawnWebGPUCache", "GPUCache", "LOCK", "Sessions", "Network"
+                }
+                # Also ignore files that end with common locked extensions
+                ignored = []
+                for name in names:
+                    if (name in blacklist or 
+                        name.endswith('-journal') or 
+                        name == 'LOCK' or 
+                        'Cache' in name or
+                        'indexeddb.leveldb' in str(Path(dir) / name)):
+                        ignored.append(name)
+                return ignored
+            
+            try:
+                shutil.copytree(src_profile_path, dst_profile_path, ignore=_ignore, ignore_dangling_symlinks=True)
+            except (PermissionError, OSError) as e:
+                log(f"[WARN] Profile copy had some permission errors (expected): {e}")
+                # Continue anyway - partial copy is usually sufficient
             log("Copy complete.")
         return str(dst_user_path), prof
     else:
@@ -64,54 +110,34 @@ def ensure_profile_copy_if_requested() -> tuple[str, str]:
 
 # --------- LLM clients ---------
 def make_local_llm() -> BaseChatModel:
-    """Optimized local LLM configuration for web navigation tasks."""
-    # Native Ollama client is more reliable for structured output than OpenAI-compatible shim
-    host = env("OLLAMA_HOST", "http://localhost:11434")
+    """Optimized local LLM configuration for web navigation tasks using llama.cpp."""
+    # Use llama.cpp server instead of Ollama for better performance and control
+    base_url = env("LLAMACPP_HOST", "http://localhost:8080")
     
     # Strategy: Use 7B model for speed and reliability in web navigation
-    # 14B model is too slow for real-time web interaction (10-50s response times)
     model = "qwen2.5:7b-instruct-q4_k_m"
     
-    # Check if models are available
+    # Check if llama.cpp server is available
     try:
-        import requests
-        response = requests.get(f"{host}/api/tags", timeout=5)
-        available_models = [m['name'] for m in response.json().get('models', [])]
-        log(f"[llm] Available models: {available_models}")
-        
-        if model not in available_models:
-            log(f"[llm] Model {model} not found, checking for alternatives...")
-            # Prefer 7B for speed, fallback to 14B if needed
-            alternatives = [
-                "qwen2.5:7b-instruct-q4_k_m",
-                "qwen2.5:7b-instruct",
-                "qwen2.5:14b-instruct-q4_k_m",  # Fallback to 14B
-                "qwen2.5:14b-instruct",
-            ]
-            for alt in alternatives:
-                if alt in available_models:
-                    model = alt
-                    log(f"[llm] Using available model: {model}")
-                    break
+        response = httpx.get(f"{base_url}/health", timeout=5)
+        if response.status_code == 200:
+            log(f"[llm] llama.cpp server is running at {base_url}")
         else:
-            log(f"[llm] Using fast 7B model for web navigation: {model}")
+            log(f"[llm] llama.cpp server responded with status {response.status_code}")
     except Exception as e:
-        log(f"[llm] Could not check available models: {e}, using default: {model}")
+        log(f"[llm] Could not connect to llama.cpp server: {e}")
+        log(f"[llm] Make sure to start the server with: start-llama-server.bat")
     
-    # Optimize timeout based on model
-    if '14b' in model.lower():
-        timeout = 120  # 14B needs more time but keep it reasonable
-        log(f"[llm] Using 14B model with extended timeout: {timeout}s")
-    else:
-        timeout = 60   # 7B is fast
-        log(f"[llm] Using 7B model with standard timeout: {timeout}s")
+    # Optimize timeout for 7B model
+    timeout = 60   # 7B is fast with llama.cpp
+    log(f"[llm] Using llama.cpp with model: {model} (timeout={timeout}s)")
     
-    return ChatOllama(
+    return ChatLlamaCpp(
         model=model,
-        host=host,
+        base_url=base_url,
         timeout=timeout,
-        # Note: ChatOllama doesn't support temperature parameter directly
-        # Temperature is controlled via model configuration in Ollama
+        temperature=0.1,  # Low temperature for consistent web navigation
+        max_tokens=4096,
     )
 
 def make_o3_llm() -> ChatOpenAI:
@@ -146,40 +172,52 @@ async def gemini_text(prompt: str) -> str:
 
 # --------- Planner & Critic (cloud) ---------
 PLANNER_SYSTEM = (
-    "You are an expert planner for a browser automation agent using local LLM execution with cloud planning. "
+    "You are an expert planner for a browser automation agent using local 7B LLM execution with cloud planning. "
     "The executor has access to a web_search tool (Serper API) and full browser automation capabilities.\n\n"
     
+    "LOCAL LLM CONSTRAINTS:\n"
+    "- 7B model optimized for single, focused actions per step\n"
+    "- Best performance with 1-2 actions per subtask\n"
+    "- Prefers direct navigation over complex exploration\n"
+    "- Response time: 10-20 seconds per action (factor into planning)\n\n"
+    
     "STRATEGIC GUIDANCE:\n"
-    "- For information gathering: Prefer web_search (Serper API) to discover authoritative sources quickly.\n"
-    "- For interactive tasks: Use web_search to find the right destination, then navigate to that site and interact there (avoid interacting on SERP).\n"
-    "- Subtask scope: Keep each subtask to 2–4 atomic actions on a single site (avoid multi-site subtasks).\n"
-    "- Each subtask should achieve a clear milestone with verifiable on-page evidence.\n"
-    "- The local executor is capable but resource-constrained—favor smaller, well-bounded steps.\n\n"
+    "- For information gathering: Use web_search first to find the exact target URL\n"
+    "- For interactive tasks: One clear action per subtask (navigate → search → click → type)\n"
+    "- Subtask scope: SINGLE action on ONE site per subtask\n"
+    "- Each subtask must have clear, verifiable completion criteria\n"
+    "- Avoid multi-step subtasks - break them into atomic single actions\n\n"
     
-    "SUBTASK QUALITY:\n"
-    "- Title: Clear, descriptive action (e.g., 'Search and analyze San Francisco weather')\n"
-    "- Instructions: Detailed steps including what tools to use when appropriate; keep actions on one target site.\n"
-    "- Success: Specific, measurable outcome that validates completion\n\n"
+    "SUBTASK QUALITY (Single Action Focus):\n"
+    "- Title: ONE specific action (e.g., 'Navigate to weather.com', 'Search for San Francisco weather')\n"
+    "- Instructions: Simple, direct action with exact steps\n"
+    "- Success: Specific on-page evidence that validates the single action completed\n\n"
     
-    "Given the user GOAL, create an optimal plan that leverages both API tools and browser automation intelligently. "
+    "Given the user GOAL, break it into atomic single-action subtasks optimized for 7B local LLM execution. "
     "Output JSON: {'subtasks': [{'title': str, 'instructions': str, 'success': str}]}"
 )
 
 CRITIC_SYSTEM = (
-    "You are an expert critic analyzing browser automation failures. The executor uses a local Qwen2.5-14B model via Ollama.\n\n"
+    "You are an expert critic analyzing browser automation failures. The executor uses local Qwen2.5-7B model via llama.cpp.\n\n"
+    
+    "LOCAL 7B MODEL CONSTRAINTS:\n"
+    "- 10-20 second response time per action\n"
+    "- Works best with single, focused actions\n"
+    "- May struggle with complex multi-step reasoning\n"
+    "- Prefers direct element interaction over exploration\n\n"
     
     "COMMON FAILURE PATTERNS:\n"
-    "- Malformed JSON output or corrupted responses\n"
+    "- Timeout due to overly complex single-step actions\n"
     "- Repetitive actions without progress\n" 
     "- Session focus loss or navigation issues\n"
-    "- Timeout due to overly complex single-step actions\n"
-    "- Incorrect element selection or interaction\n\n"
+    "- Element selection issues (prefer scroll_to_text over index)\n"
+    "- Complex instruction sets causing confusion\n\n"
     
     "ANALYSIS APPROACH:\n"
-    "1. Identify the root cause from the observation\n"
-    "2. Suggest ONE specific, actionable fix\n"
-    "3. Consider if a different tool approach would work better\n"
-    "4. Keep advice concise but actionable\n\n"
+    "1. Identify if failure is due to complexity or model limitations\n"
+    "2. Suggest ONE specific, simple fix optimized for 7B model\n"
+    "3. Recommend breaking complex actions into simpler steps\n"
+    "4. Keep advice actionable and 7B-model appropriate\n\n"
     
     "Output plain text with your diagnosis and recommended fix."
 )
@@ -213,18 +251,21 @@ async def plan_with_o3_then_gemini(goal: str) -> List[dict]:
         return data.get("subtasks", [])
 
 async def critic_with_o3_then_gemini(observation: str, subtask: str) -> str:
+    # Redact potentially sensitive page content before sending to cloud
+    redacted_observation = redact_page_content(observation)
+    
     llm = make_o3_llm()
     try:
         res = await llm.ainvoke(
             [
                 SystemMessage(content=CRITIC_SYSTEM),
-                UserMessage(content=f"SUBTASK:\n{subtask}\n\nOBSERVATION:\n{observation}"),
+                UserMessage(content=f"SUBTASK:\n{subtask}\n\nOBSERVATION:\n{redacted_observation}"),
             ]
         )
         return res.completion
     except Exception as e:
         log(f"[critic] o3 error -> fallback to Gemini: {e}")
-        return await gemini_text(CRITIC_SYSTEM + f"\n\nSUBTASK:\n{subtask}\n\nOBSERVATION:\n{observation}")
+        return await gemini_text(CRITIC_SYSTEM + f"\n\nSUBTASK:\n{subtask}\n\nOBSERVATION:\n{redacted_observation}")
 
 # --------- Serper search tool ---------
 def build_tools() -> Tools:
@@ -263,8 +304,8 @@ def build_tools_for_subtask(title: str, instructions: str, success_crit: str) ->
 
     SERPER_KEY = env("SERPER_API_KEY")
 
-    # Exclude default 'done' so we can register our guarded version under the same name
-    tools = Tools(exclude_actions=["done"])  # keep all other actions
+    # Create tools without excluding done - we'll override it
+    tools = Tools()  # keep all actions, we'll override done
 
     # Simple tool usage tracking across this subtask
     usage = {"web_search_used": False}
@@ -337,6 +378,11 @@ def build_tools_for_subtask(title: str, instructions: str, success_crit: str) ->
             if not any(d in url for d in referenced_domains):
                 return ActionResult(error="Navigate to the referenced domain before completing", long_term_memory="Destination domain not reached")
 
+        # If success=False, allow early termination but keep transparency
+        if params.success is False:
+            memory = f'Task ended without success: {params.text[:100]}'
+            return ActionResult(is_done=True, success=False, extracted_content=params.text, long_term_memory=memory)
+
         # Map success criteria keywords to on-page evidence
         def extract_keywords(text: str) -> set[str]:
             words = re.findall(r"[a-zA-Z0-9]{5,}", text.lower())
@@ -346,11 +392,6 @@ def build_tools_for_subtask(title: str, instructions: str, success_crit: str) ->
         if success_keywords:
             if not any(k in page_text or k in title_l for k in success_keywords):
                 return ActionResult(error="On-page evidence for success criteria not found yet", long_term_memory="Continue actions toward criteria")
-
-        # If success=False, allow early termination but keep transparency
-        if params.success is False:
-            memory = f'Task ended without success: {params.text[:100]}'
-            return ActionResult(is_done=True, success=False, extracted_content=params.text, long_term_memory=memory)
 
         # Passed validations -> allow completion
         memory = f'Task completed: {params.text[:100]}'
@@ -368,13 +409,12 @@ def make_browser() -> Browser:
             keep_alive=True,
         )
 
-    # Try multiple browser executables in order of preference
+    # Try multiple browser executables in order of preference (Windows-only)
     possible_executables = [
         env("CHROME_EXECUTABLE"),
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/google-chrome",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
     ]
     
     exe = None
@@ -401,7 +441,6 @@ def make_browser() -> Browser:
         "--disable-sync",
         "--disable-translate",
         "--disable-default-apps",
-        "--disable-extensions-except",
         "--disable-component-extensions-with-background-pages",
         "--no-first-run",
         "--no-default-browser-check",
@@ -413,6 +452,9 @@ def make_browser() -> Browser:
     # Notes:
     # - If Chrome refuses to start with your system profile (Chrome >=136), set COPY_PROFILE_ONCE=1.
     # - If you keep hitting CDP issues, install Chromium and point CHROME_EXECUTABLE to it.
+    # Allow toggling default extensions via env (helps avoid CRX issues on some systems)
+    enable_ext = os.getenv("ENABLE_DEFAULT_EXTENSIONS", "0").lower() not in ("0", "false", "no")
+
     return Browser(
         executable_path=exe,
         user_data_dir=user_dir,
@@ -421,6 +463,7 @@ def make_browser() -> Browser:
         devtools=False,
         keep_alive=True,  # Persist browser across subtasks to maintain session/focus
         args=browser_args,
+        enable_default_extensions=enable_ext,
     )
 
 # --------- Runner ---------
@@ -620,8 +663,9 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
             await browser.start()
             await asyncio.sleep(3)
             
-            # Test if recovery worked
-            test_event = browser.event_bus.dispatch(GetCurrentPageEvent())
+            # Test if recovery worked with proper event
+            from browser_use.browser.events import BrowserStateRequestEvent
+            test_event = browser.event_bus.dispatch(BrowserStateRequestEvent())
             await asyncio.wait_for(test_event, timeout=8)
             log("[recovery] Hard reset recovery succeeded")
             return
@@ -636,8 +680,8 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
             await browser.start()
             await asyncio.sleep(5)  # Extended initialization wait
             
-            # Test if recovery worked
-            test_event = browser.event_bus.dispatch(GetCurrentPageEvent())
+            # Test if recovery worked with proper event
+            test_event = browser.event_bus.dispatch(BrowserStateRequestEvent())
             await asyncio.wait_for(test_event, timeout=10)
             log("[recovery] Final recovery attempt succeeded")
             return
@@ -697,21 +741,21 @@ async def main(goal: str):
     cfg = RunConfig(max_failures_per_subtask=2, step_timeout_sec=240)  # Longer timeout for 14B model
 
     # Log configuration for transparency
-    log(f"🎯 Goal: {goal}")
+    log(f"[GOAL] {goal}")
     temp = getattr(local_llm, 'temperature', None)
     timeout = getattr(local_llm, 'timeout', None)
-    log(f"🤖 Local model: {local_llm.model} (temp={temp}, timeout={timeout}s)")
-    log(f"☁️  Cloud model: {env('OPENAI_MODEL', 'o3')} for planning/critic")
-    log(f"⚙️  Config: max_failures={cfg.max_failures_per_subtask}, step_timeout={cfg.step_timeout_sec}s")
-    log("🖥️  Browser keep_alive: True (persist across subtasks)")
+    log(f"[LOCAL] Model: {local_llm.model} (temp={temp}, timeout={timeout}s)")
+    log(f"[CLOUD] Model: {env('OPENAI_MODEL', 'o3')} for planning/critic")
+    log(f"[CONFIG] max_failures={cfg.max_failures_per_subtask}, step_timeout={cfg.step_timeout_sec}s")
+    log("[BROWSER] keep_alive: True (persist across subtasks)")
 
     # 1) Plan with o3 (fallback Gemini)
-    log("🧠 Planning with cloud LLM...")
+    log("[PLANNER] Planning with cloud LLM...")
     subtasks = await plan_with_o3_then_gemini(goal)
     if not subtasks:
         raise RuntimeError("Planner returned no subtasks")
 
-    log(f"📋 Generated {len(subtasks)} subtasks")
+    log(f"[PLANNER] Generated {len(subtasks)} subtasks")
 
     # 2) Execute sequentially with local grinder, escalate per-subtask on failure
     progress_notes: list[str] = []
@@ -738,7 +782,7 @@ async def main(goal: str):
         progress_notes.append(progress_note)
         log(f"[done] {title}\n{result}\n")
 
-    log("✅ All subtasks complete.")
+    log("[SUCCESS] All subtasks complete.")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

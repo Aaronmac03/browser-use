@@ -41,6 +41,7 @@ dependencies = [
     "cdp-use>=1.4.0",
     "markdown-pdf==1.5",
     "html2text>=2025.4.15",
+    "google-generativeai>=0.8.5",
 ]
 # google-api-core: only used for Google LLM APIs
 # pyperclip: only used for examples that use copy/paste
