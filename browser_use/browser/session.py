@@ -1084,20 +1084,44 @@ class BrowserSession(BaseModel):
 		browser_location = 'local browser' if self.is_local else 'remote browser'
 		self.logger.debug(f'🌎 Connecting to existing chromium-based browser via CDP: {self.cdp_url} -> ({browser_location})')
 
+		# Implement retry logic for CDP client initialization to handle race conditions
+		max_retries = 3
+		retry_delay = 1.0
+		
+		for attempt in range(max_retries):
+			try:
+				# Import cdp-use client
+
+				# Convert HTTP URL to WebSocket URL if needed
+
+				# Create and store the CDP client for direct CDP communication
+				self._cdp_client_root = CDPClient(self.cdp_url)
+				assert self._cdp_client_root is not None
+				await self._cdp_client_root.start()
+				await self._cdp_client_root.send.Target.setAutoAttach(
+					params={'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': True}
+				)
+				self.logger.debug(f'CDP client connected successfully (attempt {attempt + 1})')
+				break  # Success, exit retry loop
+				
+			except Exception as e:
+				if attempt < max_retries - 1:
+					self.logger.warning(f'CDP client connection failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {retry_delay}s...')
+					# Clean up failed connection attempt
+					if hasattr(self, '_cdp_client_root') and self._cdp_client_root:
+						try:
+							await self._cdp_client_root.stop()
+						except Exception:
+							pass
+						self._cdp_client_root = None
+					
+					await asyncio.sleep(retry_delay)
+					retry_delay *= 1.5  # Exponential backoff
+				else:
+					# Final attempt failed, re-raise the exception
+					raise
+
 		try:
-			# Import cdp-use client
-
-			# Convert HTTP URL to WebSocket URL if needed
-
-			# Create and store the CDP client for direct CDP communication
-			self._cdp_client_root = CDPClient(self.cdp_url)
-			assert self._cdp_client_root is not None
-			await self._cdp_client_root.start()
-			await self._cdp_client_root.send.Target.setAutoAttach(
-				params={'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': True}
-			)
-			self.logger.debug('CDP client connected successfully')
-
 			# Get browser targets to find available contexts/pages
 			targets = await self._cdp_client_root.send.Target.getTargets()
 

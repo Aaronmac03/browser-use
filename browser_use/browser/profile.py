@@ -505,6 +505,69 @@ class BrowserLaunchPersistentContextArgs(BrowserLaunchArgs, BrowserContextArgs):
 		if v is None:
 			return tempfile.mkdtemp(prefix='browser-use-user-data-dir-')
 		return Path(v).expanduser().resolve()
+	
+	@staticmethod
+	def detect_chrome_user_data_dir() -> Path | None:
+		"""Detect the user's Chrome user data directory on Windows."""
+		if sys.platform == 'win32':
+			import os
+			# Try common Chrome user data locations on Windows
+			chrome_paths = [
+				Path(os.path.expandvars(r'%LOCALAPPDATA%\Google\Chrome\User Data')),
+				Path(os.path.expandvars(r'%APPDATA%\Google\Chrome\User Data')),
+				Path(os.path.expandvars(r'%PROGRAMFILES%\Google\Chrome\User Data')),
+				Path(os.path.expandvars(r'%PROGRAMFILES(X86)%\Google\Chrome\User Data')),
+			]
+			
+			for path in chrome_paths:
+				if path.exists() and (path / 'Default').exists():
+					logger.info(f'Detected Chrome user data directory: {path}')
+					return path
+		
+		elif sys.platform == 'darwin':  # macOS
+			chrome_path = Path('~/Library/Application Support/Google/Chrome').expanduser()
+			if chrome_path.exists() and (chrome_path / 'Default').exists():
+				logger.info(f'Detected Chrome user data directory: {chrome_path}')
+				return chrome_path
+		
+		elif sys.platform.startswith('linux'):  # Linux
+			chrome_path = Path('~/.config/google-chrome').expanduser()
+			if chrome_path.exists() and (chrome_path / 'Default').exists():
+				logger.info(f'Detected Chrome user data directory: {chrome_path}')
+				return chrome_path
+		
+		logger.warning('Could not detect Chrome user data directory')
+		return None
+	
+	@staticmethod
+	def use_real_chrome_profile(profile_name: str = 'Default') -> 'BrowserProfile':
+		"""Create a BrowserProfile configured to use the real Chrome profile with user accounts."""
+		chrome_user_data = BrowserProfile.detect_chrome_user_data_dir()
+		
+		if chrome_user_data is None:
+			logger.warning('Chrome profile not detected, using temporary profile')
+			return BrowserProfile()
+		
+		profile_path = chrome_user_data / profile_name
+		if not profile_path.exists():
+			available_profiles = [p.name for p in chrome_user_data.iterdir() if p.is_dir() and not p.name.startswith('.')]
+			logger.warning(f'Profile "{profile_name}" not found. Available profiles: {available_profiles}')
+			if 'Default' in available_profiles:
+				profile_name = 'Default'
+				profile_path = chrome_user_data / profile_name
+			else:
+				logger.warning('No Default profile found, using temporary profile')
+				return BrowserProfile()
+		
+		logger.info(f'Using real Chrome profile: {profile_path}')
+		
+		return BrowserProfile(
+			user_data_dir=chrome_user_data,
+			profile_directory=profile_name,
+			headless=False,  # Use windowed mode for real profile usage
+			keep_alive=True,  # Keep browser alive for session continuity
+			enable_default_extensions=False,  # Use user's existing extensions
+		)
 
 
 class ProxySettings(BaseModel):
@@ -636,7 +699,7 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 		"""Copy old config window_width & window_height to window_size."""
 		if self.window_width or self.window_height:
 			logger.warning(
-				f'⚠️ BrowserProfile(window_width=..., window_height=...) are deprecated, use BrowserProfile(window_size={"width": 1920, "height": 1080}) instead.'
+				f'WARNING: BrowserProfile(window_width=..., window_height=...) are deprecated, use BrowserProfile(window_size={"width": 1920, "height": 1080}) instead.'
 			)
 			window_size = self.window_size or ViewportSize(width=0, height=0)
 			window_size['width'] = window_size['width'] or self.window_width or 1920
@@ -653,7 +716,7 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 
 		if has_storage_state and has_user_data_dir:
 			logger.warning(
-				f'⚠️ BrowserSession(...) was passed both storage_state AND user_data_dir. storage_state={self.storage_state} will forcibly overwrite '
+				f'WARNING: BrowserSession(...) was passed both storage_state AND user_data_dir. storage_state={self.storage_state} will forcibly overwrite '
 				f'cookies/localStorage/sessionStorage in user_data_dir={self.user_data_dir}. '
 				f'For multiple browsers in parallel, use only storage_state with user_data_dir=None, '
 				f'or use a separate user_data_dir for each browser and set storage_state=None.'
@@ -677,7 +740,7 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 				else 'None'
 			)
 			logger.warning(
-				f'⚠️ {self} Changing user_data_dir= {_log_pretty_path(self.user_data_dir)} ➡️ .../default-{alternate_name} to avoid {alternate_name.upper()} corruping default profile created by {BROWSERUSE_DEFAULT_CHANNEL.name}'
+				f'WARNING: {self} Changing user_data_dir= {_log_pretty_path(self.user_data_dir)} -> .../default-{alternate_name} to avoid {alternate_name.upper()} corruping default profile created by {BROWSERUSE_DEFAULT_CHANNEL.name}'
 			)
 			self.user_data_dir = CONFIG.BROWSER_USE_DEFAULT_USER_DATA_DIR.parent / f'default-{alternate_name}'
 		return self
@@ -686,7 +749,7 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 	def warn_deterministic_rendering_weirdness(self) -> Self:
 		if self.deterministic_rendering:
 			logger.warning(
-				'⚠️ BrowserSession(deterministic_rendering=True) is NOT RECOMMENDED. It breaks many sites and increases chances of getting blocked by anti-bot systems. '
+				'WARNING: BrowserSession(deterministic_rendering=True) is NOT RECOMMENDED. It breaks many sites and increases chances of getting blocked by anti-bot systems. '
 				'It hardcodes the JS random seed and forces browsers across Linux/Mac/Windows to use the same font rendering engine so that identical screenshots can be generated.'
 			)
 		return self
@@ -822,7 +885,7 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 
 			# Check if extension is already extracted
 			if ext_dir.exists() and (ext_dir / 'manifest.json').exists():
-				# logger.debug(f'✅ Using cached {ext["name"]} extension from {_log_pretty_path(ext_dir)}')
+				# logger.debug(f'[OK] Using cached {ext["name"]} extension from {_log_pretty_path(ext_dir)}')
 				extension_paths.append(str(ext_dir))
 				loaded_extension_names.append(ext['name'])
 				continue
@@ -836,14 +899,18 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 					logger.debug(f'📦 Found cached {ext["name"]} .crx file')
 
 				# Extract extension
-				logger.info(f'📂 Extracting {ext["name"]} extension...')
+				logger.info(f'Extracting {ext["name"]} extension...')
 				self._extract_extension(crx_file, ext_dir)
 
 				extension_paths.append(str(ext_dir))
 				loaded_extension_names.append(ext['name'])
 
 			except Exception as e:
-				logger.warning(f'⚠️ Failed to setup {ext["name"]} extension: {e}')
+				logger.warning(f'Failed to setup {ext["name"]} extension: {e}')
+				# If this is a critical extension failure, consider disabling all extensions
+				if "CRX file format" in str(e) or "zipfile.BadZipFile" in str(e):
+					logger.warning(f'Extension format error detected, disabling all extensions for stability')
+					return []  # Return empty list to disable all extensions
 				continue
 
 		# Apply minimal patch to cookie extension with configurable whitelist
@@ -852,9 +919,9 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 				self._apply_minimal_extension_patch(Path(path), self.cookie_whitelist_domains)
 
 		if extension_paths:
-			logger.debug(f'[BrowserProfile] 🧩 Extensions loaded ({len(extension_paths)}): [{", ".join(loaded_extension_names)}]')
+			logger.debug(f'[BrowserProfile] [EXT] Extensions loaded ({len(extension_paths)}): [{", ".join(loaded_extension_names)}]')
 		else:
-			logger.warning('[BrowserProfile] ⚠️ No default extensions could be loaded')
+			logger.warning('[BrowserProfile] WARNING: No default extensions could be loaded')
 
 		return extension_paths
 
@@ -915,7 +982,7 @@ async function initialize(checkInitialized, magic) {{
 					f.write(content)
 
 				domain_list = ', '.join(whitelist_domains)
-				logger.info(f'[BrowserProfile] ✅ Cookie extension: {domain_list} pre-populated in storage')
+				logger.info(f'[BrowserProfile] [OK] Cookie extension: {domain_list} pre-populated in storage')
 			else:
 				logger.debug('[BrowserProfile] Initialize function not found for patching')
 

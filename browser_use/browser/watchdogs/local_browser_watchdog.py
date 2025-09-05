@@ -351,84 +351,84 @@ class LocalBrowserWatchdog(BaseWatchdog):
 			port = s.getsockname()[1]
 		return port
 
-@staticmethod
-async def _wait_for_cdp_url(port: int, timeout: float = 30) -> str:
-        """Wait for the browser to start and return the CDP URL.
+	@staticmethod
+	async def _wait_for_cdp_url(port: int, timeout: float = 30) -> str:
+		"""Wait for the browser to start and return the CDP URL.
 
-        Timeout can be overridden with env var `BROWSER_START_TIMEOUT_SEC`.
-        """
-        import aiohttp
-        import os
+		Timeout can be overridden with env var `BROWSER_START_TIMEOUT_SEC`.
+		"""
+		import aiohttp
+		import os
 
-        # Allow environment override for slow starts (extensions, antivirus, first-run, etc.)
-        try:
-            env_timeout = float(os.getenv("BROWSER_START_TIMEOUT_SEC", "0") or 0)
-            if env_timeout > 0:
-                timeout = env_timeout
-        except Exception:
-            pass
+		# Allow environment override for slow starts (extensions, antivirus, first-run, etc.)
+		try:
+			env_timeout = float(os.getenv("BROWSER_START_TIMEOUT_SEC", "0") or 0)
+			if env_timeout > 0:
+				timeout = env_timeout
+		except Exception:
+			pass
 
-        start_time = asyncio.get_event_loop().time()
-        last_log = start_time
+		start_time = asyncio.get_event_loop().time()
+		last_log = start_time
 
-        while asyncio.get_event_loop().time() - start_time < timeout:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(f'http://localhost:{port}/json/version') as resp:
-                        if resp.status == 200:
-                            # Chrome is ready
-                            return f'http://localhost:{port}/'
-                        else:
-                            # Chrome is starting up and returning 502/500 errors
-                            await asyncio.sleep(0.1)
-            except Exception:
-                # Connection error - Chrome might not be ready yet
-                await asyncio.sleep(0.1)
+		while asyncio.get_event_loop().time() - start_time < timeout:
+			try:
+				async with aiohttp.ClientSession() as session:
+					async with session.get(f'http://localhost:{port}/json/version') as resp:
+						if resp.status == 200:
+							# Chrome is ready
+							return f'http://localhost:{port}/'
+						else:
+							# Chrome is starting up and returning 502/500 errors
+							await asyncio.sleep(0.1)
+			except Exception:
+				# Connection error - Chrome might not be ready yet
+				await asyncio.sleep(0.1)
 
-            # Emit a lightweight progress heartbeat roughly once per second
-            now = asyncio.get_event_loop().time()
-            if now - last_log >= 1.0:
-                try:
-                    remaining = max(0, int(timeout - (now - start_time)))
-                except Exception:
-                    remaining = 0
-                print(f"[LocalBrowserWatchdog] Waiting for CDP on :{port}… ~{remaining}s left", flush=True)
-                last_log = now
+			# Emit a lightweight progress heartbeat roughly once per second
+			now = asyncio.get_event_loop().time()
+			if now - last_log >= 1.0:
+				try:
+					remaining = max(0, int(timeout - (now - start_time)))
+				except Exception:
+					remaining = 0
+				print(f"[LocalBrowserWatchdog] Waiting for CDP on :{port}… ~{remaining}s left", flush=True)
+				last_log = now
 
-        raise TimeoutError(f'Browser did not start within {timeout} seconds')
+		raise TimeoutError(f'Browser did not start within {timeout} seconds')
 
-    @staticmethod
-    async def _cleanup_process(process: psutil.Process) -> None:
-        """Clean up browser process.
+	@staticmethod
+	async def _cleanup_process(process: psutil.Process) -> None:
+		"""Clean up browser process.
 
-        Args:
-            process: psutil.Process to terminate
-        """
-        if not process:
-            return
+		Args:
+			process: psutil.Process to terminate
+		"""
+		if not process:
+			return
 
-        try:
-            # Try graceful shutdown first
-            process.terminate()
+		try:
+			# Try graceful shutdown first
+			process.terminate()
 
-            # Use async wait instead of blocking wait
-            for _ in range(50):  # Wait up to 5 seconds (50 * 0.1)
-                if not process.is_running():
-                    return
-                await asyncio.sleep(0.1)
+			# Use async wait instead of blocking wait
+			for _ in range(50):  # Wait up to 5 seconds (50 * 0.1)
+				if not process.is_running():
+					return
+				await asyncio.sleep(0.1)
 
-            # If still running after 5 seconds, force kill
-            if process.is_running():
-                process.kill()
-                # Give it a moment to die
-                await asyncio.sleep(0.1)
+			# If still running after 5 seconds, force kill
+			if process.is_running():
+				process.kill()
+				# Give it a moment to die
+				await asyncio.sleep(0.1)
 
-        except psutil.NoSuchProcess:
-            # Process already gone
-            pass
-        except Exception:
-            # Ignore any other errors during cleanup
-            pass
+		except psutil.NoSuchProcess:
+			# Process already gone
+			pass
+		except Exception:
+			# Ignore any other errors during cleanup
+			pass
 
 	def _cleanup_temp_dir(self, temp_dir: Path | str) -> None:
 		"""Clean up temporary directory.

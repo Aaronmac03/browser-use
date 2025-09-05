@@ -85,33 +85,33 @@ def log_response(response: AgentOutput, registry=None, logger=None) -> None:
 
 	# Only log thinking if it's present
 	if response.current_state.thinking:
-		logger.debug(f'💡 Thinking:\n{response.current_state.thinking}')
+		logger.debug(f'[T] Thinking:\n{response.current_state.thinking}')
 
 	# Only log evaluation if it's not empty
 	eval_goal = response.current_state.evaluation_previous_goal
 	if eval_goal:
 		if 'success' in eval_goal.lower():
-			emoji = '👍'
+			emoji = '[+]'
 			# Green color for success
 			logger.info(f'  \033[32m{emoji} Eval: {eval_goal}\033[0m')
 		elif 'failure' in eval_goal.lower():
-			emoji = '⚠️'
+			emoji = '[!]'
 			# Red color for failure
 			logger.info(f'  \033[31m{emoji} Eval: {eval_goal}\033[0m')
 		else:
-			emoji = '❔'
+			emoji = '[?]'
 			# No color for unknown/neutral
 			logger.info(f'  {emoji} Eval: {eval_goal}')
 
 	# Always log memory if present
 	if response.current_state.memory:
-		logger.debug(f'🧠 Memory: {response.current_state.memory}')
+		logger.debug(f'[M] Memory: {response.current_state.memory}')
 
 	# Only log next goal if it's not empty
 	next_goal = response.current_state.next_goal
 	if next_goal:
 		# Blue color for next goal
-		logger.info(f'  \033[34m🎯 Next goal: {next_goal}\033[0m')
+		logger.info(f'  \033[34m[GOAL] Next goal: {next_goal}\033[0m')
 	else:
 		logger.info('')  # Add empty line for spacing
 
@@ -180,6 +180,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		include_recent_events: bool = False,
 		sample_images: list[ContentPartTextParam | ContentPartImageParam] | None = None,
 		final_response_after_failure: bool = True,
+		max_clickable_elements_length: int = 40000,
 		**kwargs,
 	):
 		if llm is None:
@@ -264,6 +265,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			llm_timeout=llm_timeout,
 			step_timeout=step_timeout,
 			final_response_after_failure=final_response_after_failure,
+			max_clickable_elements_length=max_clickable_elements_length,
 		)
 
 		# Token cost service
@@ -298,7 +300,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self.directly_open_url and not self.state.follow_up_task and not initial_actions:
 			initial_url = self._extract_url_from_task(self.task)
 			if initial_url:
-				self.logger.info(f'🔗 Found URL in task: {initial_url}, adding as initial action...')
+				self.logger.info(f'[URL] Found URL in task: {initial_url}, adding as initial action...')
 				initial_actions = [{'go_to_url': {'url': initial_url, 'new_tab': False}}]
 
 		self.initial_url = initial_url
@@ -330,6 +332,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Initialize message manager with state
 		# Initial system prompt with all actions - will be updated during each step
+		# Use minimal prompt for local LLMs to reduce context size
+		is_local_llm = self._is_local_llm(llm)
 		self._message_manager = MessageManager(
 			task=task,
 			system_message=SystemPrompt(
@@ -339,6 +343,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				extend_system_message=extend_system_message,
 				use_thinking=self.settings.use_thinking,
 				flash_mode=self.settings.flash_mode,
+				minimal_prompt=is_local_llm,
 			).get_system_message(),
 			file_system=self.file_system,
 			state=self.state.message_manager_state,
@@ -351,6 +356,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			include_tool_call_examples=self.settings.include_tool_call_examples,
 			include_recent_events=self.include_recent_events,
 			sample_images=self.sample_images,
+			max_clickable_elements_length=self.settings.max_clickable_elements_length,
 		)
 
 		if self.sensitive_data:
@@ -486,7 +492,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				f'📁 Added {len(new_files)} downloaded files to available_file_paths (total: {len(self.available_file_paths)} files)'
 			)
 			for file_path in new_files:
-				self.logger.info(f'📄 New file available: {file_path}')
+				self.logger.info(f'[FILE] New file available: {file_path}')
 		else:
 			self.logger.debug(f'📁 No new downloads detected (tracking {len(current_files)} files)')
 
@@ -737,7 +743,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		self.logger.debug(f'⚡ Step {self.state.n_steps}: Executing {len(self.state.last_model_output.action)} actions...')
 		result = await self.multi_act(self.state.last_model_output.action)
-		self.logger.debug(f'✅ Step {self.state.n_steps}: Actions completed')
+		self.logger.debug(f'[OK] Step {self.state.n_steps}: Actions completed')
 
 		self.state.last_result = result
 
@@ -762,10 +768,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			success = self.state.last_result[-1].success
 			if success:
 				# Green color for success
-				self.logger.info(f'\n📄 \033[32m Final Result:\033[0m \n{self.state.last_result[-1].extracted_content}\n\n')
+				self.logger.info(f'\n[RESULT] \033[32m Final Result:\033[0m \n{self.state.last_result[-1].extracted_content}\n\n')
 			else:
 				# Red color for failure
-				self.logger.info(f'\n📄 \033[31m Final Result:\033[0m \n{self.state.last_result[-1].extracted_content}\n\n')
+				self.logger.info(f'\n[RESULT] \033[31m Final Result:\033[0m \n{self.state.last_result[-1].extracted_content}\n\n')
 			if self.state.last_result[-1].attachments:
 				total_attachments = len(self.state.last_result[-1].attachments)
 				for i, file_path in enumerate(self.state.last_result[-1].attachments):
@@ -871,7 +877,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		"""Get model output with retry logic for empty actions"""
 		model_output = await self.get_model_output(input_messages)
 		self.logger.debug(
-			f'✅ Step {self.state.n_steps}: Got LLM response with {len(model_output.action) if model_output.action else 0} actions'
+			f'[OK] Step {self.state.n_steps}: Got LLM response with {len(model_output.action) if model_output.action else 0} actions'
 		)
 
 		if (
@@ -1012,14 +1018,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	def _log_agent_run(self) -> None:
 		"""Log the agent run"""
 		# Blue color for task
-		self.logger.info(f'\033[34m🚀 Task: {self.task}\033[0m')
+		self.logger.info(f'\033[34m[TASK] Task: {self.task}\033[0m')
 
 		self.logger.debug(f'🤖 Browser-Use Library Version {self.version} ({self.source})')
 
 	def _log_first_step_startup(self) -> None:
 		"""Log startup message only on the first step"""
 		if len(self.history.history) == 0:
-			self.logger.info(f'🧠 Starting a browser-use version {self.version} with model={self.llm.model}')
+			self.logger.info(f'[B] Starting a browser-use version {self.version} with model={self.llm.model}')
 
 	def _log_step_context(self, browser_state_summary: BrowserStateSummary) -> None:
 		"""Log step context information"""
@@ -1027,7 +1033,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		url_short = url[:50] + '...' if len(url) > 50 else url
 		interactive_count = len(browser_state_summary.dom_state.selector_map) if browser_state_summary else 0
 		self.logger.info('\n')
-		self.logger.info(f'📍 Step {self.state.n_steps}:')
+		self.logger.info(f'[STEP] Step {self.state.n_steps}:')
 		self.logger.debug(f'Evaluating page with {interactive_count} interactive elements on: {url_short}')
 
 	def _log_next_action_summary(self, parsed: 'AgentOutput') -> None:
@@ -1086,13 +1092,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		failure_count = action_count - success_count
 
 		# Format success/failure indicators
-		success_indicator = f'✅ {success_count}' if success_count > 0 else ''
+		success_indicator = f'[OK] {success_count}' if success_count > 0 else ''
 		failure_indicator = f'❌ {failure_count}' if failure_count > 0 else ''
 		status_parts = [part for part in [success_indicator, failure_indicator] if part]
-		status_str = ' | '.join(status_parts) if status_parts else '✅ 0'
+		status_str = ' | '.join(status_parts) if status_parts else '[OK] 0'
 
 		self.logger.debug(
-			f'📍 Step {self.state.n_steps}: Ran {action_count} action{"" if action_count == 1 else "s"} in {step_duration:.2f}s: {status_str}'
+			f'[STEP] Step {self.state.n_steps}: Ran {action_count} action{"" if action_count == 1 else "s"} in {step_duration:.2f}s: {status_str}'
 		)
 
 	def _log_agent_event(self, max_steps: int, agent_run_error: str | None = None) -> None:
@@ -1324,7 +1330,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 						self.step(step_info),
 						timeout=self.settings.step_timeout,
 					)
-					self.logger.debug(f'✅ Completed step {step + 1}/{max_steps}')
+					self.logger.debug(f'[OK] Completed step {step + 1}/{max_steps}')
 				except TimeoutError:
 					# Handle step timeout gracefully
 					error_msg = f'Step {step + 1} timed out after {self.settings.step_timeout} seconds'
@@ -1563,7 +1569,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				action_params = str(action_params)
 				action_params = f'{action_params[:122]}...' if len(action_params) > 128 else action_params
 				time_start = time.time()
-				self.logger.info(f'  🦾 {blue}[ACTION {i + 1}/{total_actions}]{reset} {action_params}')
+				self.logger.info(f'  [ACT] {blue}[ACTION {i + 1}/{total_actions}]{reset} {action_params}')
 
 				result = await self.tools.act(
 					action=action,
@@ -1599,7 +1605,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# self._task_end_time = time.time()
 		# self._task_duration = self._task_end_time - self._task_start_time TODO: this is not working when using take_step
 		if self.history.is_successful():
-			self.logger.info('✅ Task completed successfully')
+			self.logger.info('[OK] Task completed successfully')
 		else:
 			self.logger.info('❌ Task completed without success')
 
@@ -1962,3 +1968,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		import asyncio
 
 		return asyncio.run(self.run(max_steps=max_steps, on_step_start=on_step_start, on_step_end=on_step_end))
+
+	def _is_local_llm(self, llm) -> bool:
+		"""Check if the LLM is running locally."""
+		provider = getattr(llm, 'provider', '')
+		if provider == 'ollama' or provider == 'llamacpp':
+			return True
+		# Fallback heuristic for OpenAI-compatible local endpoints
+		if hasattr(llm, 'base_url') and getattr(llm, 'base_url', None):
+			burl = str(llm.base_url).lower()
+			return ('localhost' in burl) or ('127.0.0.1' in burl)
+		return False

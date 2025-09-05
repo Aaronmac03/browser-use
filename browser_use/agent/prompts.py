@@ -21,14 +21,18 @@ class SystemPrompt:
 		extend_system_message: str | None = None,
 		use_thinking: bool = True,
 		flash_mode: bool = False,
+		minimal_prompt: bool = False,
 	):
 		self.default_action_description = action_description
 		self.max_actions_per_step = max_actions_per_step
 		self.use_thinking = use_thinking
 		self.flash_mode = flash_mode
+		self.minimal_prompt = minimal_prompt
 		prompt = ''
 		if override_system_message:
 			prompt = override_system_message
+		elif minimal_prompt:
+			prompt = self._get_minimal_prompt()
 		else:
 			self._load_prompt_template()
 			prompt = self.prompt_template.format(max_actions=self.max_actions_per_step)
@@ -37,6 +41,22 @@ class SystemPrompt:
 			prompt += f'\n{extend_system_message}'
 
 		self.system_message = SystemMessage(content=prompt, cache=True)
+
+	def _get_minimal_prompt(self) -> str:
+		"""Get a minimal system prompt for local LLMs with limited context."""
+		# Extract just the essential actions from the full description
+		essential_actions = """
+go_to_url(url: str, new_tab: bool = False) - Navigate to URL
+click(coordinate: tuple[int, int]) - Click at coordinates  
+type_text(text: str) - Type text
+scroll(coordinate: tuple[int, int], direction: str, amount: int) - Scroll page
+done(text: str, success: bool = True) - Complete task
+"""
+		return f"""Browser automation agent. Max {self.max_actions_per_step} actions per step.
+
+ACTIONS:{essential_actions}
+
+FORMAT: {{"thinking": "plan", "actions": [{{"action": "name", "params": {{"key": "value"}}}}]}}"""
 
 	def _load_prompt_template(self) -> None:
 		"""Load the prompt template from the markdown file."""

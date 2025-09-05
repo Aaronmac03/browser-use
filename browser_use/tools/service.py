@@ -168,7 +168,7 @@ class Tools(Generic[Context]):
 				await event
 				await event.event_result(raise_if_any=True, raise_if_none=False)
 				memory = f"Searched Google for '{params.query}'"
-				msg = f'🔍  {memory}'
+				msg = f'[SEARCH] {memory}'
 				logger.info(msg)
 				return ActionResult(extracted_content=memory, long_term_memory=memory)
 			except Exception as e:
@@ -187,10 +187,10 @@ class Tools(Generic[Context]):
 
 				if params.new_tab:
 					memory = f'Opened new tab with URL {params.url}'
-					msg = f'🔗  Opened new tab with url {params.url}'
+					msg = f'[TAB] Opened new tab with url {params.url}'
 				else:
 					memory = f'Navigated to {params.url}'
-					msg = f'🔗 {memory}'
+					msg = f'[TAB] {memory}'
 
 				logger.info(msg)
 				return ActionResult(extracted_content=msg, long_term_memory=memory)

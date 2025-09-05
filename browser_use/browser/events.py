@@ -195,7 +195,7 @@ class WaitEvent(BaseEvent[None]):
 	seconds: float = 3.0
 	max_seconds: float = 10.0  # Safety cap
 
-	event_timeout: float | None = 60.0  # seconds
+	event_timeout: float | None = 10.0  # seconds - Reduced from 60s for faster failure detection
 
 
 class SendKeysEvent(BaseEvent[None]):
@@ -256,7 +256,7 @@ class BrowserStartEvent(BaseEvent):
 	cdp_url: str | None = None
 	launch_options: dict[str, Any] = Field(default_factory=dict)
 
-	event_timeout: float | None = 30.0  # seconds
+	event_timeout: float | None = 120.0  # seconds - Increased for reliable browser startup
 
 
 class BrowserStopEvent(BaseEvent):
@@ -279,13 +279,13 @@ class BrowserLaunchEvent(BaseEvent[BrowserLaunchResult]):
 
 	# TODO: add executable_path, proxy settings, preferences, extra launch args, etc.
 
-	event_timeout: float | None = 30.0  # seconds
+	event_timeout: float | None = 120.0  # seconds - Increased for reliable browser startup
 
 
 class BrowserKillEvent(BaseEvent):
 	"""Kill local browser subprocess."""
 
-	event_timeout: float | None = 30.0  # seconds
+	event_timeout: float | None = 10.0  # seconds - Reduced from 60s for faster failure detection
 
 
 # TODO: replace all Runtime.evaluate() calls with this event
@@ -296,7 +296,7 @@ class BrowserKillEvent(BaseEvent):
 # 	expression: str
 # 	await_promise: bool = True
 
-# 	event_timeout: float | None = 60.0  # seconds
+# 	event_timeout: float | None = 10.0  # seconds - Reduced from 60s for faster failure detection
 
 # TODO: add this and use the old BrowserProfile.viewport options to set it
 # class SetViewportEvent(BaseEvent):

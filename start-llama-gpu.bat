@@ -23,16 +23,16 @@ REM Start GPU-accelerated server with optimized settings for GTX 1660 Ti
 echo [INFO] Starting llama-server with GPU acceleration...
 echo [INFO] Model: qwen2.5-7b-instruct-q4_k_m.gguf
 echo [INFO] GPU Layers: 35 (optimized for 6GB VRAM)
-echo [INFO] Context Size: 2048 tokens (optimized for speed)
-echo [INFO] Batch Size: 1024 (performance optimized)
+echo [INFO] Context Size: 65536 tokens (64K for browser-use prompts)
+echo [INFO] Batch Size: 128 (memory optimized)
 echo [INFO] Performance: no-warmup + flash-attention enabled
 
 llama-server.exe ^
     --model "E:\ai\llama-models\qwen2.5-7b-instruct-q4_k_m.gguf" ^
     --host localhost ^
     --port 8080 ^
-    --ctx-size 2048 ^
-    --batch-size 1024 ^
+    --ctx-size 65536 ^
+    --batch-size 128 ^
     --ubatch-size 256 ^
     --n-gpu-layers 35 ^
     --threads 4 ^

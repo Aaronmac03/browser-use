@@ -50,6 +50,7 @@ class AgentSettings(BaseModel):
 	llm_timeout: int = 60  # Timeout in seconds for LLM calls
 	step_timeout: int = 180  # Timeout in seconds for each step
 	final_response_after_failure: bool = True  # If True, attempt one final recovery call after max_failures
+	max_clickable_elements_length: int = 40000  # Maximum characters for DOM elements in prompts
 
 
 class AgentState(BaseModel):

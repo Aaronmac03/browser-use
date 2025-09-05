@@ -36,11 +36,11 @@ logger = logging.getLogger(__name__)
 def _log_get_message_emoji(message: BaseMessage) -> str:
 	"""Get emoji for a message type - used only for logging display"""
 	emoji_map = {
-		'UserMessage': '💬',
-		'SystemMessage': '🧠',
-		'AssistantMessage': '🔨',
+		'UserMessage': '[U]',
+		'SystemMessage': '[S]',
+		'AssistantMessage': '[A]',
 	}
-	return emoji_map.get(message.__class__.__name__, '🎮')
+	return emoji_map.get(message.__class__.__name__, '[M]')
 
 
 def _log_format_message_line(message: BaseMessage, content: str, is_last_message: bool, terminal_width: int) -> list[str]:
@@ -110,6 +110,7 @@ class MessageManager:
 		include_tool_call_examples: bool = False,
 		include_recent_events: bool = False,
 		sample_images: list[ContentPartTextParam | ContentPartImageParam] | None = None,
+		max_clickable_elements_length: int = 40000,
 	):
 		self.task = task
 		self.state = state
@@ -122,6 +123,7 @@ class MessageManager:
 		self.include_tool_call_examples = include_tool_call_examples
 		self.include_recent_events = include_recent_events
 		self.sample_images = sample_images
+		self.max_clickable_elements_length = max_clickable_elements_length
 
 		assert max_history_items is None or max_history_items > 5, 'max_history_items must be None or greater than 5'
 
@@ -310,6 +312,7 @@ class MessageManager:
 			vision_detail_level=self.vision_detail_level,
 			include_recent_events=self.include_recent_events,
 			sample_images=self.sample_images,
+			max_clickable_elements_length=self.max_clickable_elements_length,
 		).get_user_message(use_vision)
 
 		# Set the state message with caching enabled

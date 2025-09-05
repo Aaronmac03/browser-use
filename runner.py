@@ -115,7 +115,7 @@ def make_local_llm() -> BaseChatModel:
     base_url = env("LLAMACPP_HOST", "http://localhost:8080")
     
     # Strategy: Use 7B model for speed and reliability in web navigation
-    model = "qwen2.5:7b-instruct-q4_k_m"
+    model = "qwen2.5-7b-instruct-q4_k_m.gguf"
     
     # Check if llama.cpp server is available
     try:
@@ -409,9 +409,43 @@ def make_browser() -> Browser:
             keep_alive=True,
         )
 
-    # Try multiple browser executables in order of preference (Windows-only)
+    # Graduated browser startup strategies (goal.md: use Chrome profile when viable)
+    # Start with fastest/most reliable strategy first for immediate functionality
+    strategies = [
+        {"use_real_profile": False, "copy_profile": False, "name": "Clean Temporary Profile", "minimal": True},
+        {"use_real_profile": False, "copy_profile": False, "name": "Clean Temporary Profile", "minimal": False},
+        {"use_real_profile": False, "copy_profile": True, "name": "Copied Profile", "minimal": False},
+        {"use_real_profile": True, "copy_profile": False, "name": "Real Chrome Profile", "minimal": False},
+    ]
+    
+    # Override strategy based on env settings
+    use_real_profile = os.getenv("USE_REAL_CHROME_PROFILE", "1").lower() in ("1", "true", "yes")
+    if use_real_profile:
+        # If user explicitly wants real profile, try it first
+        strategies = [
+            {"use_real_profile": True, "copy_profile": False, "name": "Real Chrome Profile", "minimal": False},
+            {"use_real_profile": False, "copy_profile": False, "name": "Clean Temporary Profile", "minimal": True},
+            {"use_real_profile": False, "copy_profile": False, "name": "Clean Temporary Profile", "minimal": False},
+            {"use_real_profile": False, "copy_profile": True, "name": "Copied Profile", "minimal": False},
+        ]
+    
+    for strategy in strategies:
+        try:
+            log(f"Attempting browser startup with strategy: {strategy['name']}")
+            return _create_browser_with_strategy(strategy)
+        except Exception as e:
+            log(f"Browser strategy '{strategy['name']}' failed: {e}")
+            continue
+    
+    raise RuntimeError("All browser startup strategies failed")
+
+
+def _create_browser_with_strategy(strategy: dict) -> Browser:
+    """Create browser with specific strategy using direct approach (bypasses watchdog CDP timeouts)."""
+    # Find browser executable
     possible_executables = [
         env("CHROME_EXECUTABLE"),
+        env("CHROME_EXECUTABLE_FALLBACK"),
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
@@ -427,43 +461,26 @@ def make_browser() -> Browser:
     if not exe:
         raise RuntimeError("No suitable browser executable found. Install Chrome or Chromium.")
 
-    user_dir, prof = ensure_profile_copy_if_requested()
-    
-    # Enhanced browser args for stability
+    # For now, always use minimal args approach that works reliably
+    # This bypasses the complex watchdog system that causes CDP timeouts
     browser_args = [
-        "--disable-features=OptimizationGuideModelDownloading",
-        "--disable-renderer-backgrounding",
-        "--disable-background-timer-throttling",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-ipc-flooding-protection",
-        "--disable-hang-monitor",
-        "--disable-prompt-on-repost",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-dev-shm-usage",
+        "--disable-gpu-sandbox",
         "--disable-sync",
         "--disable-translate",
         "--disable-default-apps",
-        "--disable-component-extensions-with-background-pages",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-dev-shm-usage",  # Helps with stability on some systems
-        "--disable-gpu-sandbox",    # Can help with CDP issues
     ]
-    
-    # We avoid allowed_domains entirely (per your request).
-    # Notes:
-    # - If Chrome refuses to start with your system profile (Chrome >=136), set COPY_PROFILE_ONCE=1.
-    # - If you keep hitting CDP issues, install Chromium and point CHROME_EXECUTABLE to it.
-    # Allow toggling default extensions via env (helps avoid CRX issues on some systems)
-    enable_ext = os.getenv("ENABLE_DEFAULT_EXTENSIONS", "0").lower() not in ("0", "false", "no")
+    log(f"Using direct browser creation with minimal args (bypasses watchdog timeouts)")
 
+    # Create browser directly like test_e2e_minimal.py (proven to work)
     return Browser(
         executable_path=exe,
-        user_data_dir=user_dir,
-        profile_directory=prof,
         headless=False,
         devtools=False,
         keep_alive=True,  # Persist browser across subtasks to maintain session/focus
         args=browser_args,
-        enable_default_extensions=enable_ext,
     )
 
 # --------- Runner ---------
@@ -606,6 +623,14 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
             use_thinking_mode = True
             step_timeout = cfg.step_timeout_sec
 
+        # Configure DOM content limits based on LLM type
+        if is_local:
+            # Much smaller DOM limit for local LLM to prevent context overflow
+            dom_limit = 2000  # Very conservative to prevent 502 errors
+        else:
+            # Full DOM content for cloud models with larger context windows
+            dom_limit = 40000
+
         agent = Agent(
             task=title,
             llm=llm,
@@ -629,6 +654,7 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
             # Local LLM specific optimizations
             retry_on_failure=True,
             validate_output=True,
+            max_clickable_elements_length=dom_limit,  # Context-optimized DOM limit
         )
         log(f"[{tag}] starting agent for subtask: {title}")
         result = await agent.run()

@@ -3,7 +3,7 @@
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, TypeVar, overload
+from typing import Any, TypeVar, overload, List, Dict
 
 import httpx
 from pydantic import BaseModel
@@ -57,92 +57,183 @@ class ChatLlamaCpp(BaseChatModel):
         try:
             # Serialize messages
             serialized_messages = serialize_messages(messages)
-            
-            # Prepare request payload
-            payload = {
-                "messages": serialized_messages,
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
-                "stream": False
-            }
-            
-            # Add JSON format instruction if structured output is requested
+
+            # If structured output requested, append JSON instruction before sizing
             if output_format is not None:
                 schema = output_format.model_json_schema()
-                # Instead of using response_format (which may not be supported),
-                # add JSON instruction to the last message
                 if serialized_messages:
                     last_message = serialized_messages[-1]
                     if last_message.get("role") == "user":
-                        json_instruction = f"\n\nPlease respond with valid JSON that matches this schema:\n{schema}\n\nRespond only with the JSON, no additional text."
-                        last_message["content"] += json_instruction
+                        json_instruction = (
+                            "\n\nPlease respond with valid JSON that matches this schema:\n"
+                            f"{schema}\n\nRespond only with the JSON, no additional text."
+                        )
+                        last_message["content"] = last_message.get("content", "") + json_instruction
                     else:
-                        # Add a new user message with JSON instruction
                         serialized_messages.append({
                             "role": "user",
-                            "content": f"Please respond with valid JSON that matches this schema:\n{schema}\n\nRespond only with the JSON, no additional text."
+                            "content": (
+                                "Please respond with valid JSON that matches this schema:\n"
+                                f"{schema}\n\nRespond only with the JSON, no additional text."
+                            ),
                         })
-                
-                # Try to use response_format if supported, but don't fail if not
-                try:
-                    payload["response_format"] = {"type": "json_object"}
-                except:
-                    pass  # Ignore if not supported
-            
-            # Make request to llama.cpp server
-            async with self.get_client() as client:
-                response = await client.post(
-                    f"{self.base_url.rstrip('/')}/v1/chat/completions",
-                    json=payload,
-                    headers={"Content-Type": "application/json"}
-                )
-                
-                if response.status_code != 200:
-                    raise Exception(f"llama.cpp request failed: {response.status_code} - {response.text}")
-                
-                response_data = response.json()
-                content = deserialize_response(response_data)
-                
-                # Handle structured output
+
+            # Attempt request with shrink-on-retry to avoid 502s
+            ATTEMPTS = 2
+            LIMITS = [8000, 4000]
+
+            for attempt in range(ATTEMPTS):
+                limit = LIMITS[min(attempt, len(LIMITS) - 1)]
+                msgs_to_send = _shrink_messages_to_limit(serialized_messages, limit)
+
+                total_chars = sum(len(m.get("content", "")) for m in msgs_to_send)
+                logger.debug(f"llamacpp request size attempt {attempt+1}/{ATTEMPTS}: {total_chars} chars, messages={len(msgs_to_send)}")
+                if total_chars > 8000 and attempt == 0:
+                    logger.warning(f"Large request detected: {total_chars} chars; will shrink further on retry if needed")
+
+                # Prepare request payload
+                payload = {
+                    "messages": msgs_to_send,
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "stream": False,
+                }
+                # Try to use response_format if supported (nice-to-have)
                 if output_format is not None:
                     try:
-                        # First try to parse the content directly as JSON
-                        completion = output_format.model_validate_json(content)
-                    except Exception as e:
-                        logger.warning(f"Failed to parse structured output directly: {e}")
-                        # Fallback: try to extract JSON from content using multiple patterns
-                        import re
-                        import json
-                        
-                        # Try different JSON extraction patterns
-                        patterns = [
-                            r'\{.*\}',  # Basic JSON object
-                            r'```json\s*(\{.*?\})\s*```',  # JSON in code blocks
-                            r'```\s*(\{.*?\})\s*```',  # JSON in generic code blocks
-                        ]
-                        
-                        json_text = None
-                        for pattern in patterns:
-                            match = re.search(pattern, content, re.DOTALL)
-                            if match:
-                                json_text = match.group(1) if match.groups() else match.group(0)
-                                break
-                        
-                        if json_text:
-                            try:
-                                # Validate it's proper JSON first
-                                json.loads(json_text)
-                                completion = output_format.model_validate_json(json_text)
-                            except Exception as parse_error:
-                                logger.error(f"JSON extraction failed: {parse_error}")
-                                raise Exception(f"Could not parse structured output. Content: {content[:200]}...")
-                        else:
-                            raise Exception(f"No JSON found in response. Content: {content[:200]}...")
-                else:
-                    completion = content
-                
-                return ChatInvokeCompletion(completion=completion, usage=None)
-                
+                        payload["response_format"] = {"type": "json_object"}
+                    except Exception:
+                        pass
+
+                # Make request to llama.cpp server
+                async with self.get_client() as client:
+                    response = await client.post(
+                        f"{self.base_url.rstrip('/')}/v1/chat/completions",
+                        json=payload,
+                        headers={"Content-Type": "application/json"},
+                    )
+
+                if response.status_code == 200:
+                    response_data = response.json()
+                    content = deserialize_response(response_data)
+
+                    # Handle structured output
+                    if output_format is not None:
+                        try:
+                            completion = output_format.model_validate_json(content)
+                        except Exception as e:
+                            logger.warning(f"Failed to parse structured output directly: {e}")
+                            # Fallback: try to extract JSON from content using multiple patterns
+                            import re as _re
+                            import json as _json
+
+                            patterns = [
+                                r"\{.*\}",
+                                r"```json\s*(\{.*?\})\s*```",
+                                r"```\s*(\{.*?\})\s*```",
+                            ]
+
+                            json_text = None
+                            for pattern in patterns:
+                                match = _re.search(pattern, content, _re.DOTALL)
+                                if match:
+                                    json_text = match.group(1) if match.groups() else match.group(0)
+                                    break
+
+                            if json_text:
+                                try:
+                                    _json.loads(json_text)
+                                    completion = output_format.model_validate_json(json_text)
+                                except Exception as parse_error:
+                                    logger.error(f"JSON extraction failed: {parse_error}")
+                                    raise Exception(f"Could not parse structured output. Content: {content[:200]}...")
+                            else:
+                                raise Exception(f"No JSON found in response. Content: {content[:200]}...")
+                    else:
+                        completion = content
+
+                    return ChatInvokeCompletion(completion=completion, usage=None)
+
+                # Non-200: decide whether to retry smaller
+                status = response.status_code
+                body_preview = response.text[:200]
+                logger.warning(f"llamacpp non-200 status={status}, body={body_preview}")
+                retryable = status in (502, 413, 408, 429)
+                if attempt < ATTEMPTS - 1 and retryable:
+                    logger.info("Retrying with smaller payload due to server response")
+                    continue
+                raise Exception(f"llama.cpp request failed: {status} - {response.text}")
+
         except Exception as e:
             logger.error(f"Error generating response with llama.cpp: {e}")
             raise ModelProviderError(message=str(e), model=self.name) from e
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Truncate a string to at most limit characters with ellipsis when needed."""
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return text[:limit]
+    return text[: max(0, limit - 1)] + "\u2026"
+
+
+def _shrink_messages_to_limit(messages: List[Dict[str, Any]], max_total_chars: int) -> List[Dict[str, Any]]:
+    """Shrink an OpenAI-style messages list to fit within max_total_chars.
+
+    Strategy:
+    - Preserve the last system message and the last user message.
+    - Drop oldest non-essential messages first.
+    - If still too large, truncate contents starting from the largest.
+    - Apply conservative per-message caps to avoid a single large DOM blob.
+    """
+    # Fast path
+    total = sum(len(m.get("content", "")) for m in messages)
+    if total <= max_total_chars:
+        return messages
+
+    msgs = [dict(m) for m in messages]
+
+    # Identify anchor indices to preserve
+    last_sys = max((i for i, m in enumerate(msgs) if m.get("role") == "system"), default=None)
+    last_user = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=None)
+    last_asst = max((i for i, m in enumerate(msgs) if m.get("role") == "assistant"), default=None)
+
+    def is_anchor(idx: int) -> bool:
+        return idx in {last_sys, last_user, last_asst}
+
+    # 1) Drop oldest non-anchors until under limit or only anchors remain
+    i = 0
+    while i < len(msgs) and sum(len(m.get("content", "")) for m in msgs) > max_total_chars:
+        if not is_anchor(i):
+            msgs.pop(i)
+            # do not increment i to re-check same index after pop
+            continue
+        i += 1
+
+    # 2) If still too large, apply truncation caps per message
+    if sum(len(m.get("content", "")) for m in msgs) > max_total_chars:
+        # Initial per-message caps (system small, user larger)
+        caps = {
+            "system": 1500,
+            "user": 4000,
+            "assistant": 1500,
+        }
+        # Apply caps
+        for m in msgs:
+            role = m.get("role", "user")
+            cap = caps.get(role, 1500)
+            m["content"] = _truncate(m.get("content", ""), cap)
+
+        # 3) If still over, iteratively trim the largest content
+        while sum(len(m.get("content", "")) for m in msgs) > max_total_chars and msgs:
+            # Find the message with the largest content (prefer trimming user/assistant before system)
+            idx = max(range(len(msgs)), key=lambda j: (len(msgs[j].get("content", "")), msgs[j].get("role") == "system"))
+            txt = msgs[idx].get("content", "")
+            if len(txt) <= 200:
+                # Nothing meaningful left to trim
+                break
+            new_len = max(200, len(txt) // 2)
+            msgs[idx]["content"] = _truncate(txt, new_len)
+
+    return msgs
