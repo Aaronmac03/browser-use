@@ -10,7 +10,7 @@ from browser_use.llm.llamacpp.chat import ChatLlamaCpp
 
 async def test_hybrid_simple():
     """Test basic hybrid functionality"""
-    print("🧪 Testing hybrid local+cloud setup...")
+    print("[TEST] Testing hybrid local+cloud setup...")
     
     # Use local LLM for simple task
     local_llm = ChatLlamaCpp(
@@ -28,10 +28,10 @@ async def test_hybrid_simple():
     )
     
     try:
-        print("🚀 Starting simple hybrid test...")
+        print("[RUN] Starting simple hybrid test...")
         result = await agent.run()
         
-        print(f"\n📊 Test Results:")
+        print(f"\n[RESULTS] Test Results:")
         print(f"Result type: {type(result)}")
         print(f"Result: {result}")
         
@@ -39,26 +39,26 @@ async def test_hybrid_simple():
         if result and hasattr(result, 'all_results'):
             success_count = sum(1 for r in result.all_results if getattr(r, 'success', None) is not False)
             total_count = len(result.all_results)
-            print(f"✅ Actions completed: {success_count}/{total_count}")
+            print(f"[OK] Actions completed: {success_count}/{total_count}")
             
             # Look for the origin field in the results
             for i, action_result in enumerate(result.all_results):
                 if hasattr(action_result, 'extracted_content') and action_result.extracted_content:
                     content = action_result.extracted_content
                     if 'origin' in str(content).lower():
-                        print(f"🎯 Found origin data in action {i+1}: {content}")
+                        print(f"[SUCCESS] Found origin data in action {i+1}: {content}")
                         return True
         
-        print("⚠️ Test completed but may need success criteria adjustment")
+        print("[WARN] Test completed but may need success criteria adjustment")
         return True
         
     except Exception as e:
-        print(f"❌ Test failed with error: {e}")
+        print(f"[ERROR] Test failed with error: {e}")
         return False
 
 if __name__ == "__main__":
     success = asyncio.run(test_hybrid_simple())
     if success:
-        print("\n🎉 Hybrid setup is functional!")
+        print("\n[SUCCESS] Hybrid setup is functional!")
     else:
-        print("\n💥 Hybrid setup needs attention")
+        print("\n[FAIL] Hybrid setup needs attention")
