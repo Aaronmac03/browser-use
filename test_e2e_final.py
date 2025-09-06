@@ -57,8 +57,9 @@ async def test_e2e_final():
         print(f"Result: {result}")
         
         # Check if task completed successfully
-        if result and len(result) > 0:
-            final_result = result[-1]  # Get last result
+        # Handle AgentHistoryList result
+        if hasattr(result, 'all_results') and result.all_results:
+            final_result = result.all_results[-1]  # Get last result
             success = getattr(final_result, 'success', None)
             content = getattr(final_result, 'extracted_content', 'No content')
             print(f"SUCCESS: {success}")

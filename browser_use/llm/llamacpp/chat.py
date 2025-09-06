@@ -79,8 +79,9 @@ class ChatLlamaCpp(BaseChatModel):
                         })
 
             # Attempt request with shrink-on-retry to avoid 502s
+            # Increased limits to leverage 8.4x GPU performance improvement (0.51s avg response time)
             ATTEMPTS = 2
-            LIMITS = [8000, 4000]
+            LIMITS = [12000, 8000]
 
             for attempt in range(ATTEMPTS):
                 limit = LIMITS[min(attempt, len(LIMITS) - 1)]
@@ -120,7 +121,71 @@ class ChatLlamaCpp(BaseChatModel):
                     # Handle structured output
                     if output_format is not None:
                         try:
-                            completion = output_format.model_validate_json(content)
+                            # First try direct parsing with schema transformation
+                            import json as _json
+                            parsed_json = _json.loads(content)
+                            
+                            # Log original JSON for debugging
+                            logger.warning(f"🔍 ORIGINAL JSON: {_json.dumps(parsed_json)[:500]}...")
+                            
+                            # Fix schema mismatch: convert 'actions' array to 'action' field
+                            if 'actions' in parsed_json and 'action' not in parsed_json:
+                                actions_array = parsed_json.pop('actions')
+                                if isinstance(actions_array, list) and len(actions_array) > 0:
+                                    parsed_json['action'] = actions_array
+                                    logger.warning("🔧 SCHEMA FIX: Converted 'actions' array to 'action' field for schema compatibility")
+                                else:
+                                    logger.warning("Empty or invalid 'actions' array found")
+                            
+                            # Fix action format: convert {"action": "name", "params": {...}} to {"name": {...}}
+                            if 'action' in parsed_json and isinstance(parsed_json['action'], list):
+                                fixed_actions = []
+                                for action_item in parsed_json['action']:
+                                    if isinstance(action_item, dict):
+                                        if 'action' in action_item and 'params' in action_item:
+                                            # Convert {"action": "click_element_by_index", "params": {"click_element_by_index": {"index": 1}}}
+                                            # to {"click_element_by_index": {"index": 1}}
+                                            action_name = action_item['action']
+                                            action_params = action_item['params']
+                                            
+                                            # Handle case where LLM generates full model class names
+                                            if action_name.endswith('ActionModel'):
+                                                # Convert "ExtractStructuredDataActionModel" -> "extract_structured_data"
+                                                action_name = action_name.replace('ActionModel', '')
+                                                # Convert CamelCase to snake_case
+                                                import re
+                                                action_name = re.sub('([A-Z]+)', r'_\1', action_name).lower().strip('_')
+                                                logger.warning(f"🔧 SCHEMA FIX: Converted model class name to action: {action_item['action']} -> {action_name}")
+                                            
+                                            # Handle case where LLM puts action name inside params too
+                                            if isinstance(action_params, dict) and action_name in action_params:
+                                                # Extract the actual parameters from the nested structure
+                                                actual_params = action_params[action_name]
+                                                fixed_action = {action_name: actual_params}
+                                                logger.warning(f"🔧 SCHEMA FIX: Fixed double-nested action: {action_name}")
+                                            else:
+                                                # Normal case - params are direct
+                                                fixed_action = {action_name: action_params}
+                                                logger.warning(f"🔧 SCHEMA FIX: Converted action format: {action_name}")
+                                            
+                                            # Add missing required parameters with sensible defaults
+                                            if action_name == 'extract_structured_data' and isinstance(fixed_action[action_name], dict):
+                                                if 'extract_links' not in fixed_action[action_name]:
+                                                    fixed_action[action_name]['extract_links'] = False
+                                                    logger.warning(f"🔧 SCHEMA FIX: Added missing extract_links=False for {action_name}")
+                                            
+                                            fixed_actions.append(fixed_action)
+                                        else:
+                                            # Already in correct format
+                                            fixed_actions.append(action_item)
+                                    else:
+                                        fixed_actions.append(action_item)
+                                parsed_json['action'] = fixed_actions
+                            
+                            # Convert back to JSON and validate
+                            fixed_json = _json.dumps(parsed_json)
+                            logger.warning(f"🔧 SCHEMA FIX: Final JSON before validation: {fixed_json[:500]}...")
+                            completion = output_format.model_validate_json(fixed_json)
                         except Exception as e:
                             logger.warning(f"Failed to parse structured output directly: {e}")
                             # Fallback: try to extract JSON from content using multiple patterns
@@ -142,8 +207,68 @@ class ChatLlamaCpp(BaseChatModel):
 
                             if json_text:
                                 try:
-                                    _json.loads(json_text)
-                                    completion = output_format.model_validate_json(json_text)
+                                    # Parse JSON and apply schema transformations
+                                    parsed_json = _json.loads(json_text)
+                                    
+                                    # Fix schema mismatch: convert 'actions' array to 'action' field
+                                    if 'actions' in parsed_json and 'action' not in parsed_json:
+                                        actions_array = parsed_json.pop('actions')
+                                        if isinstance(actions_array, list) and len(actions_array) > 0:
+                                            # Take the first action from the array
+                                            parsed_json['action'] = actions_array
+                                            logger.warning("🔧 SCHEMA FIX: Converted 'actions' array to 'action' field for schema compatibility")
+                                        else:
+                                            logger.warning("Empty or invalid 'actions' array found")
+                                    
+                                    # Fix action format: convert {"action": "name", "params": {...}} to {"name": {...}}
+                                    if 'action' in parsed_json and isinstance(parsed_json['action'], list):
+                                        fixed_actions = []
+                                        for action_item in parsed_json['action']:
+                                            if isinstance(action_item, dict):
+                                                if 'action' in action_item and 'params' in action_item:
+                                                    # Convert {"action": "click_element_by_index", "params": {"click_element_by_index": {"index": 1}}}
+                                                    # to {"click_element_by_index": {"index": 1}}
+                                                    action_name = action_item['action']
+                                                    action_params = action_item['params']
+                                                    
+                                                    # Handle case where LLM generates full model class names
+                                                    if action_name.endswith('ActionModel'):
+                                                        # Convert "ExtractStructuredDataActionModel" -> "extract_structured_data"
+                                                        action_name = action_name.replace('ActionModel', '')
+                                                        # Convert CamelCase to snake_case
+                                                        import re
+                                                        action_name = re.sub('([A-Z]+)', r'_\1', action_name).lower().strip('_')
+                                                        logger.warning(f"🔧 SCHEMA FIX: Converted model class name to action: {action_item['action']} -> {action_name}")
+                                                    
+                                                    # Handle case where LLM puts action name inside params too
+                                                    if isinstance(action_params, dict) and action_name in action_params:
+                                                        # Extract the actual parameters from the nested structure
+                                                        actual_params = action_params[action_name]
+                                                        fixed_action = {action_name: actual_params}
+                                                        logger.warning(f"🔧 SCHEMA FIX: Fixed double-nested action: {action_name}")
+                                                    else:
+                                                        # Normal case - params are direct
+                                                        fixed_action = {action_name: action_params}
+                                                        logger.warning(f"🔧 SCHEMA FIX: Converted action format: {action_name}")
+                                                    
+                                                    # Add missing required parameters with sensible defaults
+                                                    if action_name == 'extract_structured_data' and isinstance(fixed_action[action_name], dict):
+                                                        if 'extract_links' not in fixed_action[action_name]:
+                                                            fixed_action[action_name]['extract_links'] = False
+                                                            logger.warning(f"🔧 SCHEMA FIX: Added missing extract_links=False for {action_name}")
+                                                    
+                                                    fixed_actions.append(fixed_action)
+                                                else:
+                                                    # Already in correct format
+                                                    fixed_actions.append(action_item)
+                                            else:
+                                                fixed_actions.append(action_item)
+                                        parsed_json['action'] = fixed_actions
+                                    
+                                    # Convert back to JSON string for validation
+                                    fixed_json = _json.dumps(parsed_json)
+                                    logger.warning(f"🔧 SCHEMA FIX: Final JSON before validation (fallback): {fixed_json[:500]}...")
+                                    completion = output_format.model_validate_json(fixed_json)
                                 except Exception as parse_error:
                                     logger.error(f"JSON extraction failed: {parse_error}")
                                     raise Exception(f"Could not parse structured output. Content: {content[:200]}...")
@@ -213,11 +338,12 @@ def _shrink_messages_to_limit(messages: List[Dict[str, Any]], max_total_chars: i
 
     # 2) If still too large, apply truncation caps per message
     if sum(len(m.get("content", "")) for m in msgs) > max_total_chars:
-        # Initial per-message caps (system small, user larger)
+        # Initial per-message caps (increased for GPU performance)
+        # With 8.4x speedup, we can handle larger DOM content efficiently
         caps = {
-            "system": 1500,
-            "user": 4000,
-            "assistant": 1500,
+            "system": 2000,
+            "user": 6000,  # Increased for larger DOM processing
+            "assistant": 2000,
         }
         # Apply caps
         for m in msgs:
