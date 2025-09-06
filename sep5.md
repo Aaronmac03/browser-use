@@ -46,6 +46,132 @@ Acceptance Criteria:
 
 **GRADE: A** - All core functionality working, goal.md requirements satisfied, local-first privacy achieved
 
+## Iteration 13 (2025-09-05) — Critical Escalation Bug Discovered
+
+Summary: Discovered critical bug in runner.py escalation logic. Local LLM consistently fails with 502 errors on browser automation tasks, but system incorrectly reports success instead of escalating to cloud. The hybrid local/cloud architecture is fundamentally broken - local model never successfully completes tasks, yet system claims 100% success rate.
+
+**Third E2E Test Run Results:**
+- Duration: 239.9 seconds (4 minutes)
+- Reported Grade: A (100/100) ❌ **FALSE POSITIVE**
+- Actual Performance: Complete failure - no tasks actually completed
+- Local LLM: 502 errors on ALL subtasks
+- Cloud Escalation: NEVER TRIGGERED (critical bug)
+
+**Evidence of Failure:**
+```
+ERROR [Agent] ❌ Result failed 3/3 times: ('', 502)
+ERROR [Agent] ❌ Stopping due to 2 consecutive failures
+[runner] [done] Search web for Kroger store 40205
+AgentHistoryList(all_results=[], all_model_outputs=[])
+```
+
+**Root Cause Analysis:**
+1. **Local LLM Context Overflow**: 502 errors occur when browser DOM content + system prompts exceed llama.cpp server capacity
+2. **Escalation Logic Bug**: When Agent stops due to consecutive failures, it returns empty results instead of throwing exceptions
+3. **False Success Detection**: Runner treats empty `AgentHistoryList(all_results=[], all_model_outputs=[])` as success
+4. **Missing Exception Handling**: The escalation sequence (local-retry → local-guided → cloud-lastresort) never triggers
+
+**Consistency Analysis - Why So Inconsistent?**
+
+**Run 1 (371s)**: 
+- First subtask had 502 errors but some results: `AgentHistoryList(all_results=[ActionResult(...error="('', 502)")...])`
+- Subsequent subtasks: empty results `AgentHistoryList(all_results=[], all_model_outputs=[])`
+- Pattern: Initial failure with error objects, then complete silence
+
+**Run 2 (281s)**:
+- Different subtask plan (7 vs 10 steps) - cloud planner inconsistency
+- Same pattern: 502 errors → empty results → false success
+
+**Run 3 (239.9s)**:
+- Consistent 502 pattern across all subtasks
+- No escalation messages (`[local-primary fail]`, `[escalation]`, etc.)
+- Perfect false positive: claims 100% success with zero actual completion
+
+**The Inconsistency Sources:**
+1. **Cloud Planner Variability**: Generates different numbers of subtasks (7-10) with different complexity
+2. **Local LLM Context Sensitivity**: 502 threshold varies based on DOM size and message history
+3. **Browser State Variance**: Different page loads create different context sizes
+4. **Timing Variations**: Network conditions affect when 502 errors occur
+
+**Critical Findings:**
+1. ❌ **Local LLM Never Works**: 100% failure rate on browser automation (502 errors)
+2. ❌ **Escalation Never Triggers**: Critical bug prevents cloud fallback
+3. ❌ **False Success Reporting**: System claims success when nothing was accomplished
+4. ❌ **Goal.md Requirements NOT Met**: Local-first execution completely non-functional
+5. ❌ **Privacy Claims Invalid**: No local execution actually occurs
+
+**Immediate Actions Required:**
+1. **Fix Escalation Logic**: Detect empty results as failure, trigger cloud escalation
+2. **Context Size Limiting**: Implement aggressive DOM truncation for local LLM
+3. **Proper Error Handling**: Ensure Agent failures propagate as exceptions
+4. **Validation Logic**: Fix false positive success detection
+
+**Actual Grade: F** - System fundamentally broken, reports false success, core functionality non-operational
+
+Next Plan:
+1. **Emergency Fix**: Repair escalation logic to detect Agent failures
+2. **Context Management**: Implement strict payload limits for local LLM
+3. **Validation**: Add proper success/failure detection
+4. **Re-test**: Validate actual cloud escalation occurs when local fails
+
+## Iteration 14 (2025-09-05) — Fourth Test Confirms Pattern
+
+Summary: Fourth consecutive E2E test confirms the exact same failure pattern. Local LLM fails with 502 errors on 100% of browser automation tasks, escalation logic never triggers, system reports false success. The consistency is now undeniable - this is not intermittent behavior but systematic failure masked by broken success detection.
+
+**Fourth E2E Test Run Results:**
+- Duration: 236.2 seconds (3.9 minutes)
+- Reported Grade: A (100/100) ❌ **FALSE POSITIVE**
+- Actual Performance: Complete failure - zero tasks completed
+- Local LLM: 502 errors on ALL 8 subtasks
+- Cloud Escalation: NEVER TRIGGERED (confirmed bug)
+
+**Evidence Pattern (100% Consistent):**
+```
+ERROR [Agent] ❌ Result failed 3/3 times: ('', 502)
+ERROR [Agent] ❌ Stopping due to 2 consecutive failures
+[runner] [done] Search for Kroger store in zip 40205
+AgentHistoryList(all_results=[ActionResult(...error="('', 502)")...], all_model_outputs=[])
+[runner] [done] Open the Kroger store page
+AgentHistoryList(all_results=[], all_model_outputs=[])
+```
+
+**Four Test Runs - Identical Failure Pattern:**
+
+| Run | Duration | Subtasks | First Task Results | Remaining Tasks | Grade | Escalation |
+|-----|----------|----------|-------------------|-----------------|-------|------------|
+| 1   | 371.0s   | 10       | 502 errors with ActionResults | Empty results | A | Never |
+| 2   | 281.0s   | 7        | 502 errors with ActionResults | Empty results | A | Never |
+| 3   | 239.9s   | 7        | 502 errors with ActionResults | Empty results | A | Never |
+| 4   | 236.2s   | 8        | 502 errors with ActionResults | Empty results | A | Never |
+
+**Confirmed Systematic Issues:**
+1. **100% Local LLM Failure Rate**: Not a single successful browser automation task across 32 total subtasks
+2. **Escalation Logic Completely Broken**: Zero escalation attempts across 4 runs despite consistent failures
+3. **False Success Detection**: System awards Grade A for complete failure 100% of the time
+4. **Cloud Planner Variability**: Generates 7-10 subtasks per run, creating execution time variance
+5. **Performance Illusion**: Faster times (236s vs 371s) due to faster failures, not better performance
+
+**The "Inconsistency" Explained:**
+- **Execution Time Variance**: 236-371 seconds based on number of subtasks and failure timing
+- **Subtask Count Variance**: Cloud planner generates different plans (7-10 steps)
+- **Result Pattern Variance**: First subtask sometimes has error objects, others always empty
+- **Core Failure Constant**: 502 errors and no escalation across ALL runs
+
+**Definitive Conclusions:**
+1. ❌ **Local-First Architecture Failed**: 0% local execution success rate
+2. ❌ **Hybrid System Broken**: No cloud escalation despite local failures
+3. ❌ **Goal.md Requirements Unmet**: Privacy and local execution claims are false
+4. ❌ **Production Readiness**: System is fundamentally non-functional
+5. ❌ **Success Metrics Invalid**: All reported grades are false positives
+
+**System Status: CRITICAL FAILURE**
+- Local LLM: 0/32 successful subtasks (0% success rate)
+- Escalation Logic: 0/4 runs triggered escalation (100% bug rate)
+- Success Detection: 4/4 false positives (100% error rate)
+- Actual Functionality: Complete system failure masked by broken reporting
+
+The system is not inconsistent - it's consistently broken with a 100% failure rate disguised as success.
+
 ## Iteration 11 (2025-09-05) — Local LLM Request Capping Implementation
 
 Summary: Implemented request-size capping and shrink-on-retry in ChatLlamaCpp to prevent 502 errors on GTX 1660 Ti hardware. Added proactive payload sizing (8000→4000 chars) with intelligent message truncation. Local LLM now handles simple requests reliably, but E2E testing blocked by Windows Unicode encoding issues in logging.

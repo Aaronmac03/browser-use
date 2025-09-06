@@ -488,6 +488,57 @@ class RunConfig(BaseModel):
     max_failures_per_subtask: int = 2
     step_timeout_sec: int = 120
 
+def is_valid_result(result: Any) -> bool:
+    """
+    Validate if a result represents a successful completion.
+    Treats as failure and escalates when any of the following occur:
+    - Exception/timeout in local call
+    - HTTP status >= 400
+    - Empty/None/whitespace-only output
+    - Parser error or missing required fields
+    """
+    if not result:
+        return False
+    
+    # If result is a dict with success field
+    if isinstance(result, dict):
+        if not result.get("success"):
+            return False
+        text = (result.get("output") or "").strip()
+        if not text:
+            return False
+        return True
+    
+    # If using raw strings
+    text = str(result).strip()
+    if not text:
+        return False
+    
+    # Check for common error indicators
+    error_indicators = ["error", "failed", "timeout", "exception", "502", "503", "504"]
+    text_lower = text.lower()
+    if any(indicator in text_lower for indicator in error_indicators):
+        return False
+    
+    return True
+
+def create_result_dict(success: bool, output: str, error: str = None, source: str = "local") -> dict:
+    """
+    Create standardized result dictionary with expected schema:
+    {
+      "success": true|false,
+      "output": "<assistant text>",
+      "error": "<error message or None>",
+      "source": "local" | "cloud"
+    }
+    """
+    return {
+        "success": success,
+        "output": output,
+        "error": error,
+        "source": source
+    }
+
 async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Tools,
                           title: str, instructions: str, success_crit: str, cfg: RunConfig,
                           injected_state=None, progress_context: str = "") -> tuple[str, Any]:
@@ -720,7 +771,13 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
     # 1) First local attempt with standard configuration
     try:
         agent, hist = await _attempt(local_llm, "local-primary")
-        return str(hist), getattr(agent, "state", None)
+        result_text = str(hist)
+        if is_valid_result(result_text):
+            log("[local-primary] Success with local LLM")
+            return result_text, getattr(agent, "state", None)
+        else:
+            log("[local-primary] Local result invalid, continuing to retry")
+            raise ValueError("Local result validation failed")
     except Exception as e_local:
         log(f"[local-primary fail] {e_local}")
 
@@ -730,7 +787,13 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
         # Retry with more conservative settings for better reliability
         log("[local-retry] Attempting with conservative settings...")
         agent, hist = await _attempt(local_llm, "local-conservative")
-        return str(hist), getattr(agent, "state", None)
+        result_text = str(hist)
+        if is_valid_result(result_text):
+            log("[local-retry] Success with local LLM")
+            return result_text, getattr(agent, "state", None)
+        else:
+            log("[local-retry] Local result invalid, continuing to critic guidance")
+            raise ValueError("Local retry result validation failed")
     except Exception as e_local_retry:
         log(f"[local-retry fail] {e_local_retry}")
 
@@ -742,7 +805,13 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
         # Apply critic insights and try local again
         log("[local-guided] Attempting with critic guidance...")
         agent, hist = await _attempt(local_llm, "local-guided")
-        return str(hist), getattr(agent, "state", None)
+        result_text = str(hist)
+        if is_valid_result(result_text):
+            log("[local-guided] Success with local LLM")
+            return result_text, getattr(agent, "state", None)
+        else:
+            log("[local-guided] Local result invalid, escalating to cloud")
+            raise ValueError("Local guided result validation failed")
     except Exception as e_local_guided:
         log(f"[local-guided fail] {e_local_guided}")
 
@@ -752,8 +821,9 @@ async def run_one_subtask(local_llm: BaseChatModel, browser: Browser, tools: Too
     try:
         await _recover_session("pre-cloud escalation")
         agent, hist = await _attempt(cloud_llm, "cloud-lastresort")
+        result_text = str(hist)
         log("[escalation] Cloud succeeded - consider improving local LLM prompting for this scenario")
-        return str(hist), getattr(agent, "state", None)
+        return result_text, getattr(agent, "state", None)
     except Exception as e_cloud:
         log(f"[cloud-lastresort fail] {e_cloud}")
         raise RuntimeError(f"Subtask '{title}' failed completely after all attempts: local primary, local retry, local guided, cloud last resort") from e_cloud
