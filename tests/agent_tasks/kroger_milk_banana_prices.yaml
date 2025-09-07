@@ -1,0 +1,10 @@
+name: Kroger Milk and Banana Prices Check
+task: Go to Kroger.com, set the store location to zip code 40205, and find the current prices for milk and bananas. Return the specific prices for both items.
+judge_context:
+  - The agent must navigate to Kroger.com
+  - The agent must set or verify the store location to zip code 40205
+  - The agent must search for or find milk prices
+  - The agent must search for or find banana prices
+  - The agent must return specific price information for both milk and bananas
+  - The prices should be current and from the correct store location
+max_steps: 20
