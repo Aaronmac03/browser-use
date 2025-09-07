@@ -30,10 +30,10 @@ class LocalLLMConfig:
 	preferred_models: List[str] = None
 	fallback_models: List[str] = None
 	
-	# Performance settings - optimized for GTX 1660 Ti
-	max_actions_per_step: int = 1  # Single actions for precision
-	max_history_items: int = 6     # Minimal context for speed
-	step_timeout: int = 45         # Faster timeout for GPU acceleration
+	# Performance settings - optimized for 14B model
+	max_actions_per_step: int = 2  # More actions with 14B reasoning
+	max_history_items: int = 10    # Larger context with 14B model
+	step_timeout: int = 60         # Longer timeout for 14B processing
 	max_failures: int = 3          # Allow retries with recovery
 	
 	# Memory management - optimized for 16GB RAM + 6GB VRAM
@@ -49,9 +49,9 @@ class LocalLLMConfig:
 	gpu_memory_fraction: float = 0.8  # Use 80% of VRAM
 	batch_processing: bool = True     # Enable batch processing
 	
-	# Response optimization
-	temperature: float = 0.1          # Low temperature for consistency
-	max_tokens: int = 2048           # Reduced for faster responses
+	# Response optimization for 14B model
+	temperature: float = 0.2          # Slightly higher for 14B creativity
+	max_tokens: int = 4096           # Increased for detailed responses
 	top_p: float = 0.9               # Nucleus sampling
 	
 	# Hardware-specific optimizations
@@ -61,9 +61,9 @@ class LocalLLMConfig:
 		if self.preferred_models is None:
 			# Optimized for Windows PC i7-9750H + GTX 1660 Ti (6GB VRAM)
 			self.preferred_models = [
-				"qwen2.5-7b-instruct-q4_k_m",    # Best for GPU acceleration
+				"qwen2.5-14b-instruct-q4_k_m",   # Upgraded 14B model for superior reasoning
+				"qwen2.5-7b-instruct-q4_k_m",    # Fallback 7B model
 				"qwen2.5-coder:7b",              # For technical tasks
-				"llama3.1:8b",                   # For complex reasoning
 			]
 		
 		if self.fallback_models is None:
@@ -92,17 +92,12 @@ class OptimizedLocalLLM:
 		
 		model = await self._select_best_model()
 		
-		# Optimized client configuration for GTX 1660 Ti
+		# Optimized client configuration for 14B model
 		self._client = ChatLlamaCpp(
 			model=model,
 			base_url=self.host,
-			timeout=self.config.step_timeout,
 			temperature=self.config.temperature,
 			max_tokens=self.config.max_tokens,
-			top_p=self.config.top_p,
-			# Additional performance optimizations
-			request_timeout=self.config.step_timeout,
-			max_retries=2,
 		)
 		
 		logger.info(f"[READY] Optimized local LLM ready: {model}")
