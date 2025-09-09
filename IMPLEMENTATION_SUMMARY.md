@@ -130,7 +130,7 @@
 
 ### Integration Points
 - **LLM Server**: http://localhost:8080 (llama.cpp)
-- **Model**: qwen2.5-7b-instruct-q4_k_m
+- **Model**: qwen2.5-14b-instruct-q4_k_m
 - **Browser**: Chrome with profile support
 - **Extensions**: uBlock Origin (with fallback handling)
 

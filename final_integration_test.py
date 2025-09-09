@@ -143,7 +143,7 @@ class FinalIntegrationTester:
         try:
             # Create local LLM
             local_llm = ChatLlamaCpp(
-                model="qwen2.5-7b-instruct",
+                model="qwen2.5-14b-instruct",
                 base_url="http://localhost:8080",
                 timeout=30,
                 temperature=0.1

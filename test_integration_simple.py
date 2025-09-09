@@ -19,7 +19,7 @@ async def test_integration():
     print("\n[TEST 1] Local LLM Performance")
     llm = ChatLlamaCpp(
         base_url="http://localhost:8080",
-        model="qwen2.5-7b-instruct-q4_k_m",
+        model="qwen2.5-14b-instruct-q4_k_m",
         temperature=0.1,
         timeout=30
     )

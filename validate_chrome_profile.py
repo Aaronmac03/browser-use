@@ -40,7 +40,7 @@ async def test_chrome_profile():
     # Test with local LLM
     local_llm = ChatLlamaCpp(
         base_url="http://localhost:8080",
-        model="qwen2.5:7b-instruct-q4_k_m",
+        model="qwen2.5:14b-instruct-q4_k_m",
         temperature=0.1,
         max_tokens=2048
     )
@@ -87,7 +87,7 @@ async def test_chrome_profile_with_login_check():
     
     local_llm = ChatLlamaCpp(
         base_url="http://localhost:8080", 
-        model="qwen2.5:7b-instruct-q4_k_m",
+        model="qwen2.5:14b-instruct-q4_k_m",
         temperature=0.1,
         max_tokens=2048
     )

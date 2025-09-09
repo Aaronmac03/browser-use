@@ -51,7 +51,7 @@ Successfully implemented and executed comprehensive E2E testing for "check milk 
 - **Product Search:** Multiple product searches and price extraction working
 
 ### ✅ Hardware Optimization (PERFECT)
-- **GTX 1660 Ti Compatible:** qwen2.5-7b-instruct-q4_k_m model used
+- **GTX 1660 Ti Compatible:** qwen2.5-14b-instruct-q4_k_m model used
 - **Memory Efficient:** Optimized for 16GB RAM
 - **Performance:** Sub-4 minute execution (well within targets)
 - **Resource Management:** Efficient browser session handling confirmed

@@ -40,7 +40,7 @@
 
 ### ✅ ONLY WORKING COMPONENT
 - **Local LLM Server**: llama.cpp running successfully on localhost:8080
-- **Model**: qwen2.5-7b-instruct-q4_k_m loaded with 35 GPU layers
+- **Model**: qwen2.5-14b-instruct-q4_k_m loaded with 35 GPU layers
 - **Hardware**: GTX 1660 Ti performing adequately for LLM inference
 
 ## 🛠️ EMERGENCY ACTION PLAN

@@ -7,7 +7,7 @@ Based on our comprehensive testing and implementation, here's what's left to ful
 ## ✅ **FULLY ACHIEVED (95% Complete)**
 
 ### 1. **Local LLMs for Grunt Work** ✅
-- qwen2.5-7b-instruct-q4_k_m working perfectly
+- qwen2.5-14b-instruct-q4_k_m working perfectly
 - Optimized for GTX 1660 Ti + 16GB RAM
 - Handles 95%+ of processing locally
 

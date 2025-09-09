@@ -23,7 +23,7 @@ class TestLlamaIntegration:
     
     def test_model_file_exists(self):
         """Test that the required model file exists."""
-        model_path = Path("E:/ai/llama-models/qwen2.5-7b-instruct-q4_k_m.gguf")
+        model_path = Path("E:/ai/llama-models/qwen2.5-14b-instruct-q4_k_m.gguf")
         assert model_path.exists(), f"Model file not found at {model_path}"
     
     def test_startup_script_exists(self):
@@ -63,7 +63,7 @@ class TestLlamaIntegration:
         assert config.use_vision is False, "Should disable vision for performance"
         
         # Check preferred models for 7B optimization
-        assert "qwen2.5-7b-instruct-q4_k_m" in config.preferred_models[0]
+        assert "qwen2.5-14b-instruct-q4_k_m" in config.preferred_models[0]
         assert len(config.preferred_models) >= 2, "Should have multiple model options"
     
     @pytest.mark.asyncio

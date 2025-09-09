@@ -33,7 +33,7 @@ async def test_e2e_final():
         
         # Create local LLM directly
         local_llm = ChatLlamaCpp(
-            model="qwen2.5:7b-instruct-q4_k_m",
+            model="qwen2.5:14b-instruct-q4_k_m",
             base_url="http://localhost:8080",
             timeout=60,
             temperature=0.1,

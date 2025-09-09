@@ -30,7 +30,7 @@
    - Local-first processing: `local_first_threshold: float = 0.9` (90%+ local)
    - Privacy-first: Web content stays on local machine
    - Cloud planning: Uses o3-mini for complex planning tasks
-   - Local execution: Uses qwen2.5-7b-instruct-q4_k_m for web actions
+   - Local execution: Uses qwen2.5-14b-instruct-q4_k_m for web actions
 
 ### Performance Optimizations Implemented:
 

@@ -48,7 +48,7 @@ async def test_minimal_browser_automation():
             llm_provider="llamacpp",
             llm_provider_options={
                 "base_url": "http://localhost:8080",
-                "model": "qwen2.5:7b-instruct-q4_k_m",
+                "model": "qwen2.5:14b-instruct-q4_k_m",
                 "temperature": 0.1,
                 "timeout": 60
             },

@@ -21,14 +21,20 @@ cd /d "E:\ai\llama.cpp\build\bin\Release"
 
 REM Start GPU-accelerated server with optimized settings for GTX 1660 Ti
 echo [INFO] Starting llama-server with GPU acceleration...
-echo [INFO] Model: qwen2.5-7b-instruct-q4_k_m.gguf
+echo [INFO] Model: qwen2.5-14b-instruct-q4_k_m.gguf
 echo [INFO] GPU Layers: 35 (optimized for 6GB VRAM)
 echo [INFO] Context Size: 65536 tokens (64K for browser-use prompts)
 echo [INFO] Batch Size: 128 (memory optimized)
 echo [INFO] Performance: no-warmup + flash-attention enabled
 
+REM Default to Qwen 14B model, override with MODEL_NAME environment variable
+if "%MODEL_NAME%"=="" set MODEL_NAME=qwen2.5-14b-instruct-q4_k_m.gguf
+if "%MODEL_NAME%"=="r1" set MODEL_NAME=deepseek-r1-distill-llama-8b-q4_k_m.gguf
+
+echo [INFO] Using model: %MODEL_NAME%
+
 llama-server.exe ^
-    --model "E:\ai\llama-models\qwen2.5-7b-instruct-q4_k_m.gguf" ^
+    --model "E:\ai\llama-models\%MODEL_NAME%" ^
     --host localhost ^
     --port 8080 ^
     --ctx-size 65536 ^

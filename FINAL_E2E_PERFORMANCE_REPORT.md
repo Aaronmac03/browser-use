@@ -39,7 +39,7 @@ The system demonstrates **excellent foundational optimization** but is blocked b
 
 3. **LLM Performance** - Grade: A
    - Server: Running at localhost:8080
-   - Model: qwen2.5:7b-instruct-q4_k_m
+   - Model: qwen2.5:14b-instruct-q4_k_m
    - Response time: ~2 seconds
    - Temperature: 0.1 (optimal for consistency)
 

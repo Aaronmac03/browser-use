@@ -117,7 +117,7 @@ class TestHybridOrchestrator:
         """Test that local LLM gets optimized settings based on model size."""
         # Test with different model configurations
         test_cases = [
-            ("qwen2.5-7b-instruct", {"max_actions": 2, "max_history": 10, "timeout": 90}),
+            ("qwen2.5-14b-instruct", {"max_actions": 2, "max_history": 10, "timeout": 90}),
             ("qwen2.5-14b-instruct", {"max_actions": 3, "max_history": 15, "timeout": 150}),
             ("unknown-model", {"max_actions": 2, "max_history": 10, "timeout": 90}),
         ]

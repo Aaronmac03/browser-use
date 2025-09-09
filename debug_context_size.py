@@ -12,7 +12,7 @@ async def debug_context_size():
     # Create local LLM
     local_llm = ChatLlamaCpp(
         base_url="http://localhost:8080",
-        model="qwen2.5-7b-instruct-q4_k_m.gguf",
+        model="qwen2.5-14b-instruct-q4_k_m.gguf",
         temperature=0.1,
         timeout=60
     )

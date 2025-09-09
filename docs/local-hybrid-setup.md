@@ -14,9 +14,9 @@ This document summarizes what we changed, why we changed it, and how the pieces 
   - File: `runner.py` (import `ChatOllama`, return it from `make_local_llm`).
   - Reason: Ollama’s native `format=` handling is more consistent than the OpenAI‑compatible shim for tool/JSON outputs.
 
-- Local model defaults: **Updated to `qwen2.5:7b-instruct-q4_k_m`** (better performance than 14B Q2_K).
+- Local model defaults: **Updated to `qwen2.5:14b-instruct-q4_k_m`** (better capability than 7B models).
   - Files: `.env`, `.env.example` (`OLLAMA_HOST`, `OLLAMA_MODEL`).
-  - Reason: **Q4_K_M quantization provides significantly better reasoning quality than Q2_K, even with smaller parameter count. 7B Q4_K_M outperforms 14B Q2_K for browser automation tasks.**
+  - Reason: **14B Q4_K_M quantization provides better reasoning capability than 7B models while maintaining good performance on modern hardware with 16GB+ RAM.**
 
 - Agent tuning for local execution:
   - `use_thinking=False` when local (reduce verbosity and off‑track reasoning for smaller models).
@@ -81,8 +81,8 @@ This document summarizes what we changed, why we changed it, and how the pieces 
 
 1) Ensure Ollama is running and the model is pulled:
    - `OLLAMA_HOST=http://localhost:11434`
-   - `OLLAMA_MODEL=qwen2.5:7b-instruct-q4_k_m` (recommended for best performance)
-   - Alternative: `qwen2.5:14b-instruct-q4_k_m` (if you have more RAM and want slightly better capability)
+   - `OLLAMA_MODEL=qwen2.5:14b-instruct-q4_k_m` (recommended for best performance)
+   - Alternative: `qwen2.5:7b-instruct-q4_k_m` (if you have limited RAM or want faster inference)
 
 2) Populate `.env` with cloud planner/critic keys (e.g., `OPENAI_API_KEY`) and optional `SERPER_API_KEY`.
 
@@ -94,8 +94,8 @@ This document summarizes what we changed, why we changed it, and how the pieces 
 
 - If Chrome default profile fails to connect (v136+), set `COPY_PROFILE_ONCE=1` and re‑run once to create a local copy under `./runtime/user_data/<Profile>`.
 - **Model recommendations for 16GB RAM**:
-  - **Best**: `qwen2.5:7b-instruct-q4_k_m` (optimal performance/memory balance)
-  - **Alternative**: `qwen2.5:14b-instruct-q4_k_m` (higher capability, more memory usage)
+  - **Best**: `qwen2.5:14b-instruct-q4_k_m` (optimal performance/capability balance)
+  - **Alternative**: `qwen2.5:7b-instruct-q4_k_m` (lower memory usage, reduced capability)
   - **Avoid**: Any Q2_K quantizations (too aggressive, poor reasoning quality)
 - Groq Llama 4 is a cost‑effective cloud escalation alternative if it fits your privacy constraints.
 - **Browser-use 0.7.1 requires the bug fixes** documented above for reliable operation.

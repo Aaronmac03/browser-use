@@ -49,7 +49,7 @@ The browser-use system shows **critical startup failures** that prevent successf
 ## Goal.md Compliance Assessment
 
 ### ✅ Achieved Goals
-- **Local LLM Integration**: llama.cpp server working (qwen2.5-7b-instruct-q4_k_m)
+- **Local LLM Integration**: llama.cpp server working (qwen2.5-14b-instruct-q4_k_m)
 - **Privacy Architecture**: Content redaction system implemented
 - **Chrome Profile Support**: Profile copying mechanism exists
 - **Cost Optimization**: Hybrid local/cloud model approach designed

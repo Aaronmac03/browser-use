@@ -79,7 +79,7 @@ def create_large_dom_content(size_chars: int) -> str:
 async def test_dom_processing_capacity():
     """Test DOM processing with various content sizes."""
     llm = ChatLlamaCpp(
-        model="qwen2.5-7b-instruct",
+        model="qwen2.5-14b-instruct",
         base_url="http://localhost:8080",
         temperature=0.1,
         timeout=30.0
@@ -128,7 +128,7 @@ Webpage content:
 async def test_escalation_logic():
     """Test that escalation still works with enhanced limits."""
     llm = ChatLlamaCpp(
-        model="qwen2.5-7b-instruct", 
+        model="qwen2.5-14b-instruct", 
         base_url="http://localhost:8080",
         timeout=10.0
     )

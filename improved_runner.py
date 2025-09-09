@@ -281,7 +281,7 @@ class ImprovedRunner:
 	def _create_local_llm(self) -> BaseChatModel:
 		"""Create local LLM for execution."""
 		base_url = os.getenv("LLAMACPP_HOST", "http://localhost:8080")
-		model = "qwen2.5-7b-instruct-q4_k_m.gguf"
+		model = "qwen2.5-14b-instruct-q4_k_m.gguf"
 		
 		return ChatLlamaCpp(
 			model=model,

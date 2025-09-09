@@ -114,8 +114,8 @@ def make_local_llm() -> BaseChatModel:
     # Use llama.cpp server instead of Ollama for better performance and control
     base_url = env("LLAMACPP_HOST", "http://localhost:8080")
     
-    # Strategy: Use 7B model for speed and reliability in web navigation
-    model = "qwen2.5-7b-instruct-q4_k_m.gguf"
+    # Strategy: Use 14B model for better reasoning capability in web navigation
+    model = "qwen2.5-14b-instruct-q4_k_m.gguf"
     
     # Check if llama.cpp server is available
     try:

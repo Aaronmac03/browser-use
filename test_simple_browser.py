@@ -62,7 +62,7 @@ async def test_basic_agent():
     try:
         # Create local LLM
         llm = ChatLlamaCpp(
-            model="qwen2.5-7b-instruct-q4_k_m.gguf",
+            model="qwen2.5-14b-instruct-q4_k_m.gguf",
             base_url="http://localhost:8080",
             timeout=30,
             temperature=0.1

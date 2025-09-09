@@ -17,7 +17,7 @@ Edit `.env` with your configuration:
 ```bash
 # Local LLM Configuration (Primary for privacy)
 LOCAL_LLM_URL=http://localhost:8080
-LLAMACPP_MODEL_PATH=./models/qwen2.5-7b-instruct-q4_k_m.gguf
+LLAMACPP_MODEL_PATH=./models/qwen2.5-14b-instruct-q4_k_m.gguf
 
 # Cloud Models (Strategic use only)
 ANTHROPIC_API_KEY=your_claude_api_key

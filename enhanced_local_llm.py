@@ -125,7 +125,7 @@ class OptimizedLocalLLM:
 			logger.error(f"[ERROR] llama.cpp server connection failed: {e}")
 		
 		# Default fallback
-		self._selected_model = "qwen2.5-7b-instruct-q4_k_m"
+		self._selected_model = "qwen2.5-14b-instruct-q4_k_m"
 		logger.info(f"[INFO] Using default model: {self._selected_model}")
 		return self._selected_model
 	

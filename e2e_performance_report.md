@@ -31,7 +31,7 @@ The system shows mixed performance with critical browser connectivity issues pre
    - Local LLM server running and responsive
    - Temperature optimized (0.1 for consistency)
    - Timeout settings appropriate (60s)
-   - Model selection appropriate (qwen2.5:7b-instruct-q4_k_m)
+   - Model selection appropriate (qwen2.5:14b-instruct-q4_k_m)
 
 3. **Cloud Integration - GOOD (B+)**
    - O3 planning working correctly

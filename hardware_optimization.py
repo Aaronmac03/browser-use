@@ -213,18 +213,34 @@ class HardwareOptimizer:
             use_mmap=vram_gb < 4
         )
     
-    def generate_server_config(self, profile: HardwareProfile = None) -> str:
+    def generate_server_config(self, profile: HardwareProfile = None, model_name: str = None) -> str:
         """Generate optimized llama.cpp server configuration."""
         if profile is None:
             profile = self.detected_profile or self.detect_hardware()
         
+        # Default model selection
+        if model_name is None:
+            model_name = "qwen2.5-14b-instruct-q4_k_m.gguf"
+        
+        # Support model shortcuts
+        model_mapping = {
+            "r1": "deepseek-r1-distill-llama-8b-q4_k_m.gguf",
+            "qwen14b": "qwen2.5-14b-instruct-q4_k_m.gguf", 
+            "qwen7b": "qwen2.5-7b-instruct-q4_k_m.gguf"
+        }
+        
+        if model_name in model_mapping:
+            model_name = model_mapping[model_name]
+        
         config_lines = [
             f"REM {profile.name} Optimized Configuration",
             f"REM {profile.gpu_vram_gb:.1f}GB VRAM, {profile.cpu_cores} cores, {profile.ram_gb:.1f}GB RAM",
+            f"REM Model: {model_name}",
             f"echo Optimizing for {profile.name}...",
+            f"echo Model: {model_name}",
             "",
             "%SERVER_PATH% ^",
-            '    --model "e:\\ai\\llama-models\\qwen2.5-7b-instruct-q4_k_m.gguf" ^',
+            f'    --model "e:\\ai\\llama-models\\{model_name}" ^',
             "    --host 0.0.0.0 ^",
             "    --port 8080 ^",
             "    --ctx-size 4096 ^",

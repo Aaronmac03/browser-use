@@ -15,7 +15,7 @@ async def test_hybrid_quick():
     # Use local LLM for simple task
     local_llm = ChatLlamaCpp(
         base_url="http://localhost:8080",
-        model="qwen2.5:7b-instruct-q4_k_m",
+        model="qwen2.5:14b-instruct-q4_k_m",
         temperature=0.1,
         max_tokens=1024  # Smaller to be faster
     )

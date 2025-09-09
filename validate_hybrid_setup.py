@@ -129,7 +129,7 @@ def check_environment():
     # Check hardware optimization
     log("Hardware optimization status:")
     log("  Target: GTX 1660 Ti (6GB VRAM) + i7-9750H + 16GB RAM")
-    log("  Model: qwen2.5-7b-instruct-q4_k_m (optimized for 6GB VRAM)")
+    log("  Model: qwen2.5-14b-instruct-q4_k_m (optimized for 6GB VRAM)")
     log("  Quantization: Q4_K_M (balance of speed and quality)")
 
 async def main():
