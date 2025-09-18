@@ -678,6 +678,27 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self._log_step_context(browser_state_summary)
 		await self._raise_if_stopped_or_paused()
 
+		# Loop detection
+		if self.state.last_model_output:
+			import hashlib
+
+			last_action_hash = hashlib.sha256(str(self.state.last_model_output.action).encode()).hexdigest()
+			browser_state_hash = hashlib.sha256(str(browser_state_summary.dom_state).encode()).hexdigest()
+			current_step_hash = f'{last_action_hash}-{browser_state_hash}'
+
+			if current_step_hash in self.state.step_hashes:
+				self.logger.warning('Loop detected! The agent is repeating the same actions.')
+				self._message_manager._add_context_message(
+					UserMessage(
+						content='You are stuck in a loop. Please try a different approach to solve the task. Do not repeat the same actions.'
+					)
+				)
+
+			# Add current hash to history and keep it at a fixed size
+			self.state.step_hashes.append(current_step_hash)
+			if len(self.state.step_hashes) > 5:  # Keep the last 5 hashes
+				self.state.step_hashes.pop(0)
+
 		# Update action models with page-specific actions
 		self.logger.debug(f'📝 Step {self.state.n_steps}: Updating action models...')
 		await self._update_action_models_for_page(browser_state_summary.url)

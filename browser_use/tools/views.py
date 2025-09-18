@@ -1,4 +1,4 @@
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -91,3 +91,28 @@ class GetDropdownOptionsAction(BaseModel):
 class SelectDropdownOptionAction(BaseModel):
 	index: int = Field(ge=1, description='index of the dropdown element to select an option for')
 	text: str = Field(description='the text or exact value of the option to select')
+
+
+class FormInputTextAction(BaseModel):
+	action_type: Literal['input_text'] = 'input_text'
+	index: int = Field(ge=0, description='index of the element to input text into, 0 is the page')
+	text: str
+	clear_existing: bool = Field(default=True, description='set True to clear existing text, False to append to existing text')
+
+
+class FormClickAction(BaseModel):
+	action_type: Literal['click'] = 'click'
+	index: int = Field(ge=1, description='index of the element to click')
+
+
+class FormSelectDropdownOptionAction(BaseModel):
+	action_type: Literal['select_option'] = 'select_option'
+	index: int = Field(ge=1, description='index of the dropdown element to select an option for')
+	text: str = Field(description='the text or exact value of the option to select')
+
+
+FormAction = Union[FormInputTextAction, FormClickAction, FormSelectDropdownOptionAction]
+
+
+class FillFormAction(BaseModel):
+	actions: list[FormAction] = Field(description='A list of actions to perform on the form.')

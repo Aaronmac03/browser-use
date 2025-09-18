@@ -37,6 +37,7 @@ from browser_use.tools.views import (
 	ClickElementAction,
 	CloseTabAction,
 	DoneAction,
+	FillFormAction,
 	GetDropdownOptionsAction,
 	GoToUrlAction,
 	InputTextAction,
@@ -534,6 +535,60 @@ class Tools(Generic[Context]):
 			except Exception as e:
 				logger.error(f'Failed to upload file: {e}')
 				raise BrowserError(f'Failed to upload file: {e}')
+
+		@self.registry.action(
+			'Fill a form with a series of actions. Use this to input text, click buttons, and select dropdown options in a single, stateful operation.',
+			param_model=FillFormAction,
+		)
+		async def fill_form(
+			params: FillFormAction,
+			browser_session: BrowserSession,
+			has_sensitive_data: bool = False,
+			sensitive_data: dict[str, str | dict[str, str]] | None = None,
+		):
+			form_state = []
+			for action in params.actions:
+				action_result = None
+				try:
+					if action.action_type == 'input_text':
+						action_result = await input_text(
+							InputTextAction(index=action.index, text=action.text, clear_existing=action.clear_existing),
+							browser_session=browser_session,
+							has_sensitive_data=has_sensitive_data,
+							sensitive_data=sensitive_data,
+						)
+					elif action.action_type == 'click':
+						action_result = await click_element_by_index(
+							ClickElementAction(index=action.index), browser_session=browser_session
+						)
+					elif action.action_type == 'select_option':
+						action_result = await select_dropdown_option(
+							SelectDropdownOptionAction(index=action.index, text=action.text),
+							browser_session=browser_session,
+						)
+
+					if action_result and action_result.error:
+						form_state.append({'action': action.model_dump(), 'status': 'error', 'error': action_result.error})
+						# Stop processing further actions if an error occurs
+						return ActionResult(
+							error=f'Error during form filling: {action_result.error}',
+							extracted_content=json.dumps(form_state, indent=2),
+						)
+
+					form_state.append({'action': action.model_dump(), 'status': 'success'})
+
+				except Exception as e:
+					form_state.append({'action': action.model_dump(), 'status': 'error', 'error': str(e)})
+					return ActionResult(
+						error=f'An unexpected error occurred during form filling: {e}',
+						extracted_content=json.dumps(form_state, indent=2),
+					)
+
+			return ActionResult(
+				extracted_content='Form filled successfully.',
+				long_term_memory=f'Successfully filled form with {len(params.actions)} actions.',
+				metadata={'form_state': form_state},
+			)
 
 		# Tab Management Actions
 

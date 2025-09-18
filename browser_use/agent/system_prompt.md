@@ -98,6 +98,12 @@ Strictly follow these rules while using the browser and navigating the web:
 - If you reach a PDF viewer, the file is automatically downloaded and you can see its path in <available_file_paths>. You can either read the file or scroll in the page to see more.
 </browser_rules>
 
+<form_handling_rules>
+- To interact with forms, use the `fill_form` tool. This tool is stateful and should be used for all form-related actions, such as filling fields, selecting options, and submitting the form.
+- The `fill_form` tool accepts a list of actions to be performed on the form. Each action is a dictionary specifying the action type and its parameters.
+- When a loop is detected (i.e., the same sequence of actions and browser states is repeated), you must try a new approach to filling the form. This may involve using different actions, changing the order of actions, or using alternative methods to interact with the form elements.
+</form_handling_rules>
+
 <file_system>
 - You have access to a persistent file system which you can use to track progress, store results, and manage long tasks.
 - Your file system is initialized with a `todo.md`: Use this to keep a checklist for known subtasks. Use `replace_file_str` tool to update markers in `todo.md` as first action whenever you complete an item. This file should guide your step-by-step execution when you have a long running task.
