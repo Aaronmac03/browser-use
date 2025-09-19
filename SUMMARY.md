@@ -8,12 +8,19 @@ The goal of this project is to create a highly capable, personalized web agent t
 
 ## 2. Agent Architecture and Features
 
-The agent is built on the `browser-use` Python library and has the following key features:
+The agent has been architected as a multi-layered, intelligent system designed for complex task automation.
 
-*   **Language Model:** It uses Google's **Gemini 2.5 Pro** model for its reasoning and decision-making capabilities, accessed via Vertex AI.
-*   **Browser Integration:** It uses the user's local Chrome browser and profile, allowing it to access existing sessions, cookies, and extensions.
-*   **Search Capability:** It is equipped with a custom tool that uses the **Serper API** to perform Google searches.
-*   **Complex Form Handling:** The agent has been enhanced with a dedicated `fill_form` tool and a loop detection mechanism to reliably navigate and complete complex web forms.
+*   **Hierarchical Planning:** The system uses a two-tiered agent structure:
+    *   A **Manager Agent** acts as a "thinker," decomposing high-level user goals into a series of concrete, actionable sub-tasks.
+    *   A **Worker Agent** acts as a "doer," executing each sub-task using the browser and other tools.
+*   **Long-Term Memory:** The agent is equipped with a persistent long-term memory, powered by a local ChromaDB vector database. It stores the details of every task it performs, allowing it to learn from both its successes and failures.
+*   **Self-Correction and Reflection:** After each task, the agent enters a "reflection" phase where it critically analyzes its own performance. These reflections are stored in its long-term memory, creating a continuous feedback loop for improvement.
+*   **Language Model:** The agent's intelligence is powered by Google's **Gemini 2.5 Pro** model, accessed via Vertex AI.
+*   **Personalized Browser Integration:** The agent uses the user's local Chrome browser and profile, giving it access to existing sessions, cookies, and extensions for a seamless experience.
+*   **Advanced Tooling:** The agent is equipped with a suite of advanced tools, including:
+    *   A **Serper API** integration for Google searches.
+    *   A stateful `fill_form` tool for reliably navigating complex web forms.
+    *   A loop detection mechanism to prevent it from getting stuck.
 
 ## 3. How to Run the Agent
 

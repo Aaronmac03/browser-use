@@ -687,7 +687,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			current_step_hash = f'{last_action_hash}-{browser_state_hash}'
 
 			if current_step_hash in self.state.step_hashes:
-				self.logger.warning('Loop detected! The agent is repeating the same actions.')
+				self.logger.warning(f'Loop detected! The agent is repeating the same actions. Hash: {current_step_hash}')
 				self._message_manager._add_context_message(
 					UserMessage(
 						content='You are stuck in a loop. Please try a different approach to solve the task. Do not repeat the same actions.'

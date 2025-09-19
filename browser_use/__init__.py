@@ -7,12 +7,11 @@ from browser_use.logging_config import setup_logging
 if os.environ.get('BROWSER_USE_SETUP_LOGGING', 'true').lower() != 'false':
 	from browser_use.config import CONFIG
 
-	# Get log file paths from config/environment
-	debug_log_file = getattr(CONFIG, 'BROWSER_USE_DEBUG_LOG_FILE', None)
-	info_log_file = getattr(CONFIG, 'BROWSER_USE_INFO_LOG_FILE', None)
+	# Get log directory from config/environment
+	log_dir = getattr(CONFIG, 'BROWSER_USE_LOG_DIR', None)
 
 	# Set up logging with file handlers if specified
-	logger = setup_logging(debug_log_file=debug_log_file, info_log_file=info_log_file)
+	logger = setup_logging(log_dir=log_dir)
 else:
 	import logging
 

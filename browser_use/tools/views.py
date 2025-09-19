@@ -8,6 +8,10 @@ class SearchGoogleAction(BaseModel):
 	query: str
 
 
+class SearchMemoryAction(BaseModel):
+	query: str
+
+
 class GoToUrlAction(BaseModel):
 	url: str
 	new_tab: bool = False  # True to open in new tab, False to navigate in current tab

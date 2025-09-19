@@ -82,6 +82,7 @@ def register_gmail_actions(tools: Tools, gmail_service: GmailService | None = No
 			if not emails:
 				query_info = f" matching '{params.keyword}'" if params.keyword.strip() else ''
 				memory = f'No recent emails found from last {time_filter}{query_info}'
+				logger.warning(f"get_recent_emails: {memory}")
 				return ActionResult(
 					extracted_content=memory,
 					long_term_memory=memory,

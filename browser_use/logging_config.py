@@ -4,10 +4,54 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+from logging.handlers import RotatingFileHandler
+import json
 
 load_dotenv()
 
 from browser_use.config import CONFIG
+
+
+class JsonFormatter(logging.Formatter):
+    """
+    Formats log records as JSON strings.
+    """
+
+    def format(self, record):
+        log_record = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            log_record["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_record)
+
+
+def setup_file_logging(log_dir: str, root_logger: logging.Logger):
+    """
+    Set up file logging with rotation and JSON format.
+    """
+    log_dir_path = Path(log_dir)
+    log_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # Define log file paths
+    info_log = log_dir_path / "info.log"
+    debug_log = log_dir_path / "debug.log"
+
+    # Create rotating file handlers
+    info_handler = RotatingFileHandler(info_log, maxBytes=10*1024*1024, backupCount=5)
+    info_handler.setLevel(logging.INFO)
+    info_handler.setFormatter(JsonFormatter())
+
+    debug_handler = RotatingFileHandler(debug_log, maxBytes=10*1024*1024, backupCount=5)
+    debug_handler.setLevel(logging.DEBUG)
+    debug_handler.setFormatter(JsonFormatter())
+
+    # Add handlers to the root logger
+    root_logger.addHandler(info_handler)
+    root_logger.addHandler(debug_handler)
 
 
 def addLoggingLevel(levelName, levelNum, methodName=None):
@@ -61,15 +105,14 @@ def addLoggingLevel(levelName, levelNum, methodName=None):
 	setattr(logging, methodName, logToRoot)
 
 
-def setup_logging(stream=None, log_level=None, force_setup=False, debug_log_file=None, info_log_file=None):
+def setup_logging(stream=None, log_level=None, force_setup=False, log_dir: str | None = None):
 	"""Setup logging configuration for browser-use.
 
 	Args:
 		stream: Output stream for logs (default: sys.stdout). Can be sys.stderr for MCP mode.
 		log_level: Override log level (default: uses CONFIG.BROWSER_USE_LOGGING_LEVEL)
 		force_setup: Force reconfiguration even if handlers already exist
-		debug_log_file: Path to log file for debug level logs only
-		info_log_file: Path to log file for info level logs only
+		log_dir: Path to directory for log files
 	"""
 	# Try to add RESULT level, but ignore if it already exists
 	try:
@@ -133,43 +176,24 @@ def setup_logging(stream=None, log_level=None, force_setup=False, debug_log_file
 	# Configure root logger only
 	root.addHandler(console)
 
-	# Add file handlers if specified
-	file_handlers = []
+	# Add file handlers if a log directory is specified
+	if log_dir:
+		setup_file_logging(log_dir, root)
 
-	# Create debug log file handler
-	if debug_log_file:
-		debug_handler = logging.FileHandler(debug_log_file, encoding='utf-8')
-		debug_handler.setLevel(logging.DEBUG)
-		debug_handler.setFormatter(BrowserUseFormatter('%(asctime)s - %(levelname)-8s [%(name)s] %(message)s', logging.DEBUG))
-		file_handlers.append(debug_handler)
-		root.addHandler(debug_handler)
-
-	# Create info log file handler
-	if info_log_file:
-		info_handler = logging.FileHandler(info_log_file, encoding='utf-8')
-		info_handler.setLevel(logging.INFO)
-		info_handler.setFormatter(BrowserUseFormatter('%(asctime)s - %(levelname)-8s [%(name)s] %(message)s', logging.INFO))
-		file_handlers.append(info_handler)
-		root.addHandler(info_handler)
-
-	# Configure root logger - use DEBUG if debug file logging is enabled
-	effective_log_level = logging.DEBUG if debug_log_file else log_level
+	# Configure root logger - use DEBUG if file logging is enabled
+	effective_log_level = logging.DEBUG if log_dir else log_level
 	root.setLevel(effective_log_level)
 
 	# Configure browser_use logger
 	browser_use_logger = logging.getLogger('browser_use')
 	browser_use_logger.propagate = False  # Don't propagate to root logger
 	browser_use_logger.addHandler(console)
-	for handler in file_handlers:
-		browser_use_logger.addHandler(handler)
 	browser_use_logger.setLevel(effective_log_level)
 
 	# Configure bubus logger to allow INFO level logs
 	bubus_logger = logging.getLogger('bubus')
 	bubus_logger.propagate = False  # Don't propagate to root logger
 	bubus_logger.addHandler(console)
-	for handler in file_handlers:
-		bubus_logger.addHandler(handler)
 	bubus_logger.setLevel(logging.INFO if log_type == 'result' else effective_log_level)
 
 	# Configure CDP logging using cdp_use's setup function

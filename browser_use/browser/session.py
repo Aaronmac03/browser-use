@@ -330,6 +330,7 @@ class BrowserSession(BaseModel):
 	_cached_browser_state_summary: Any = PrivateAttr(default=None)
 	_cached_selector_map: dict[int, EnhancedDOMTreeNode] = PrivateAttr(default_factory=dict)
 	_downloaded_files: list[str] = PrivateAttr(default_factory=list)  # Track files downloaded during this session
+	_watchdogs_attached: bool = PrivateAttr(default=False)
 
 	# Watchdogs
 	_crash_watchdog: Any | None = PrivateAttr(default=None)
@@ -410,22 +411,15 @@ class BrowserSession(BaseModel):
 		self._screenshot_watchdog = None
 		self._permissions_watchdog = None
 		self._recording_watchdog = None
+		self._watchdogs_attached = False
 
-	def model_post_init(self, __context) -> None:
-		"""Register event handlers after model initialization."""
-		# Check if handlers are already registered to prevent duplicates
-
+	def _register_core_handlers(self) -> None:
+		"""Register the core handlers for the BrowserSession on its event_bus."""
 		from browser_use.browser.watchdog_base import BaseWatchdog
 
 		start_handlers = self.event_bus.handlers.get('BrowserStartEvent', [])
-		start_handler_names = [getattr(h, '__name__', str(h)) for h in start_handlers]
-
-		if any('on_BrowserStartEvent' in name for name in start_handler_names):
-			raise RuntimeError(
-				'[BrowserSession] Duplicate handler registration attempted! '
-				'on_BrowserStartEvent is already registered. '
-				'This likely means BrowserSession was initialized multiple times with the same EventBus.'
-			)
+		if start_handlers:
+			return
 
 		BaseWatchdog.attach_handler_to_session(self, BrowserStartEvent, self.on_BrowserStartEvent)
 		BaseWatchdog.attach_handler_to_session(self, BrowserStopEvent, self.on_BrowserStopEvent)
@@ -436,6 +430,10 @@ class BrowserSession(BaseModel):
 		BaseWatchdog.attach_handler_to_session(self, AgentFocusChangedEvent, self.on_AgentFocusChangedEvent)
 		BaseWatchdog.attach_handler_to_session(self, FileDownloadedEvent, self.on_FileDownloadedEvent)
 		BaseWatchdog.attach_handler_to_session(self, CloseTabEvent, self.on_CloseTabEvent)
+
+	def model_post_init(self, __context) -> None:
+		"""Register event handlers after model initialization."""
+		self._register_core_handlers()
 
 	async def start(self) -> None:
 		"""Start the browser session."""
@@ -482,6 +480,7 @@ class BrowserSession(BaseModel):
 		await self.reset()
 		# Create fresh event bus
 		self.event_bus = EventBus()
+		self._register_core_handlers()
 
 	async def on_BrowserStartEvent(self, event: BrowserStartEvent) -> dict[str, str]:
 		"""Handle browser start request.

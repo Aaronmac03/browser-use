@@ -10,6 +10,7 @@ try:
 except ImportError:
 	Laminar = None  # type: ignore
 from pydantic import BaseModel
+import chromadb
 
 from browser_use.agent.views import ActionModel, ActionResult
 from browser_use.browser import BrowserSession
@@ -44,6 +45,7 @@ from browser_use.tools.views import (
 	NoParamsAction,
 	ScrollAction,
 	SearchGoogleAction,
+	SearchMemoryAction,
 	SelectDropdownOptionAction,
 	SendKeysAction,
 	StructuredOutputAction,
@@ -115,6 +117,22 @@ class Tools(Generic[Context]):
 		self._register_done_action(output_model)
 
 		# Basic Navigation Actions
+		@self.registry.action(
+			'Search your memory for a similar task. Use the user request as the query. The results will help you create a better plan.',
+			param_model=SearchMemoryAction,
+		)
+		async def search_memory(params: SearchMemoryAction, browser_session: BrowserSession):
+			try:
+				client = chromadb.PersistentClient(path=os.path.join(os.getcwd(), '.chroma_db'))
+				collection = client.get_collection(name="agent_experiences")
+				results = collection.query(
+					query_texts=[params.query],
+					n_results=5
+				)
+				return ActionResult(extracted_content=str(results))
+			except Exception as e:
+				return ActionResult(error=f"Failed to search memory: {e}")
+
 		@self.registry.action(
 			'Search the query in Google, the query should be a search query like humans search in Google, concrete and not vague or super long.',
 			param_model=SearchGoogleAction,
